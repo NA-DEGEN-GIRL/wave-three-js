@@ -30,7 +30,7 @@ import { RefractionPass } from "./RefractionPass.js";
 import { FoamSimulation } from "./FoamSimulation.js";
 import { OceanFFT } from "./OceanFFT.js";
 
-const DEFAULT_GRID = { levels: 1, segments: 192, baseSize: 1600 };
+const DEFAULT_GRID = { levels: 6, segments: 96, baseSize: 200 };
 
 class WaveSampler {
   constructor(getCtx) { this._get = getCtx; }
@@ -292,7 +292,7 @@ export class WaterSystem {
     };
     // Splash subgroup — bright burst foam at wave-object intersections.
     this.splash = { enabled: true, intensity: 1.0 };
-    this.fog = { enabled: true, fadeStart: 280, fadePower: 1.3 };
+    this.fog = { enabled: true, fadeStart: 900, fadePower: 1.4 };
     this.waterline = { thickness: 0.5, normalStrength: 0.7, smoothness: 0.3, highlightSharpness: 3.0, highlightStrength: 0.8 };
     this.sunShafts = { enabled: true, intensity: 0.2, falloff: 1.5, fadeIn: 0.25, softness: 0.75 };
     this.underwaterSurfaceGlow = { enabled: true, intensity: 5.81, focusPower: 75.7, color: "#fef7e0" };
