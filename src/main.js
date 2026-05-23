@@ -433,12 +433,60 @@ async function main() {
     water.buoyancy.addObject(c, { heightOffset: -0.2, rotationInfluence: 0.6 });
   }
 
+  // ---- Post-processing pipeline ----
+  // Bloom — kept subtle so the SkyMesh sun disc + sun specular glow without
+  // burning the whole frame to white. The official three.js webgpu_ocean
+  // example uses strength 0.1, threshold 0, radius 0 — even subtler than this.
+  // NOTE: this MUST be created before the GUI block below — the Display folder
+  // wires getters/setters straight to bloomPass.* uniforms.
+  const postProcessing = new THREE.PostProcessing(renderer);
+  const scenePass = pass(scene, camera);
+  let outputNode = scenePass.getTextureNode("output");
+  const bloomPass = bloom(outputNode, 0.12, 0.5, 0.9);
+  outputNode = outputNode.add(bloomPass);
+  postProcessing.outputNode = outputNode;
+
+  // User-controlled base exposure. The animate loop reads this and applies a
+  // small underwater bump on top, instead of hard-overriding the slider value
+  // every frame (which was the "exposure 조절해도 아무 변화없음" symptom).
+  const exposureState = { base: renderer.toneMappingExposure };
+
   // ---- GUI ----
   const fpsEl = document.getElementById("fps");
   let frames = 0, fpsTimer = performance.now();
 
   const gui = new GUI({ title: "Water Pro" });
   gui.domElement.style.zIndex = 11;
+
+  // Helper: attach a tooltip + small description to a lil-gui controller.
+  // Hover the slider name to see what each one does.
+  const desc = (ctrl, text) => {
+    if (!ctrl) return ctrl;
+    if (typeof ctrl.description === "function") ctrl.description(text);
+    if (ctrl.domElement) ctrl.domElement.title = text;
+    return ctrl;
+  };
+
+  // ---------- Display (exposure, bloom) — TOP folder, most-used knobs ----------
+  const displayFolder = gui.addFolder("Display (exposure / bloom)");
+  desc(
+    displayFolder
+      .add(exposureState, "base", 0.05, 2.5, 0.01)
+      .name("exposure")
+      .onChange((v) => (renderer.toneMappingExposure = v)),
+    "Overall scene brightness. SkyMesh is calibrated for ~0.1. Try 0.3-0.6 for our scene. Lower = darker sky/sun, less blowout. The animate loop adds a small bump underwater on top of this.",
+  );
+  const bloomCtrl = {
+    get strength()  { return bloomPass.strength.value; },
+    set strength(v) { bloomPass.strength.value = v; },
+    get threshold() { return bloomPass.threshold.value; },
+    set threshold(v){ bloomPass.threshold.value = v; },
+    get radius()    { return bloomPass.radius.value; },
+    set radius(v)   { bloomPass.radius.value = v; },
+  };
+  desc(displayFolder.add(bloomCtrl, "strength",  0, 1.5, 0.01),  "Bloom intensity. 0 = no glow. Higher = sun/highlights bleed more.");
+  desc(displayFolder.add(bloomCtrl, "threshold", 0, 2,   0.01),  "Brightness above which pixels glow. Lower = more things bloom (sky, foam). Higher = only sun.");
+  desc(displayFolder.add(bloomCtrl, "radius",    0, 2,   0.01),  "How far bloom spreads from a bright pixel.");
 
   const presetState = { name: initialPresetName };
   gui.add(presetState, "name", listPresets()).name("preset").onChange((n) => {
@@ -471,15 +519,15 @@ async function main() {
     get microAmp()       { return water.waves.microAmplitude.value; },  set microAmp(v)     { water.waves.microAmplitude.value = v; },
     get microFreq()      { return water.waves.microFrequency.value; },  set microFreq(v)    { water.waves.microFrequency.value = v; },
   };
-  wavesFolder.add(wavesProxy, "windSpeed", 0, 80, 0.5);
-  wavesFolder.add(wavesProxy, "windDirection", 0, Math.PI * 2, 0.01);
-  wavesFolder.add(wavesProxy, "choppiness", 0, 2, 0.01);
-  wavesFolder.add(wavesProxy, "amplitude", 0, 3, 0.01);
-  wavesFolder.add(wavesProxy, "animationSpeed", 0, 3, 0.01);
-  wavesFolder.add(wavesProxy, "rippleAmp", 0, 2, 0.01).name("ripple.amp");
-  wavesFolder.add(wavesProxy, "rippleFreq", 0.01, 0.3, 0.005).name("ripple.freq");
-  wavesFolder.add(wavesProxy, "microAmp", 0, 0.3, 0.005).name("micro.amp");
-  wavesFolder.add(wavesProxy, "microFreq", 0.1, 2, 0.05).name("micro.freq");
+  desc(wavesFolder.add(wavesProxy, "windSpeed",     0, 80, 0.5),      "Wind speed in m/s. Drives global wave amplitude. 5-10 calm, 15-25 moderate, 30+ stormy.");
+  desc(wavesFolder.add(wavesProxy, "windDirection", 0, Math.PI * 2, 0.01), "Wind direction in radians. Rotates wave/foam streaks.");
+  desc(wavesFolder.add(wavesProxy, "choppiness",    0, 2, 0.01),      "Horizontal wave displacement. 0=smooth sine, 1=natural, 1.5+=sharp choppy crests.");
+  desc(wavesFolder.add(wavesProxy, "amplitude",     0, 3, 0.01),      "Global wave height multiplier on top of windSpeed scaling.");
+  desc(wavesFolder.add(wavesProxy, "animationSpeed",0, 3, 0.01),      "Time scale. 0 freezes the surface, 1 = normal.");
+  desc(wavesFolder.add(wavesProxy, "rippleAmp",     0, 2, 0.01).name("ripple.amp"),     "FBM mid-scale ripple amplitude (normal perturbation + slight vertical).");
+  desc(wavesFolder.add(wavesProxy, "rippleFreq",    0.01, 0.3, 0.005).name("ripple.freq"), "FBM mid-scale ripple frequency. Lower = larger ripples.");
+  desc(wavesFolder.add(wavesProxy, "microAmp",      0, 0.3, 0.005).name("micro.amp"),  "FBM fine ripple amplitude — mainly normal perturbation for sun glitter.");
+  desc(wavesFolder.add(wavesProxy, "microFreq",     0.1, 2, 0.05).name("micro.freq"),  "FBM fine ripple frequency. Higher = denser glitter.");
 
   const gerstnerFolder = gui.addFolder("Gerstner");
   const gerstnerProxy = { ...water.gerstner };
@@ -507,41 +555,82 @@ async function main() {
   foamFolder.add(water.splash, "intensity", 0, 3, 0.05).name("splash.intensity");
 
   const appearance = gui.addFolder("Appearance");
-  appearance.addColor({ c: "#" + water.color.shallowWaterColor.getHexString() }, "c").name("shallow").onChange((v) => water.color.shallowWaterColor.set(v));
-  appearance.addColor({ c: "#" + water.color.deepWaterColor.getHexString() }, "c").name("deep").onChange((v) => water.color.deepWaterColor.set(v));
-  appearance.add(water.color, "depthFalloff", 1, 100, 0.5);
-  appearance.add(water.color, "clarity", 0.0, 2.5, 0.05).name("clarity (see-through)");
-  appearance.add(water.fresnel, "power", 1, 8, 0.1).name("fresnel.power");
-  appearance.add(water.sparkle, "enabled").name("sparkle.enabled");
-  appearance.add(water.sparkle, "intensity", 0, 3, 0.05).name("sparkle.intensity");
-  appearance.add(water.fog, "enabled").name("fog.enabled");
-  appearance.add(water.fog, "fadeStart", 50, 1500, 10).name("fog.fadeStart");
-  appearance.add(water.fog, "fadePower", 0.3, 4, 0.05).name("fog.fadePower");
+  desc(appearance.addColor({ c: "#" + water.color.shallowWaterColor.getHexString() }, "c").name("shallow").onChange((v) => water.color.shallowWaterColor.set(v)),
+    "Water colour in shallow / surface regions.");
+  desc(appearance.addColor({ c: "#" + water.color.deepWaterColor.getHexString() }, "c").name("deep").onChange((v) => water.color.deepWaterColor.set(v)),
+    "Water colour at depth — Beer-Lambert absorption fades toward this.");
+  desc(appearance.add(water.color, "depthFalloff", 1, 100, 0.5),
+    "How quickly water gets darker with depth (metres). Lower = murkier.");
+  desc(appearance.add(water.color, "clarity", 0.0, 2.5, 0.05).name("clarity (see-through)"),
+    "0=opaque (lake), 1=normal, 2=tropical lagoon. Boosts refraction visibility.");
+  desc(appearance.add(water.fresnel, "power", 1, 8, 0.1).name("fresnel.power"),
+    "Schlick exponent — how sharply reflection ramps up at grazing angles.");
+  desc(appearance.add(water.sparkle, "enabled").name("sparkle.enabled"),    "Toggle high-freq sun sparkle on water surface.");
+  desc(appearance.add(water.sparkle, "intensity", 0, 3, 0.05).name("sparkle.intensity"),  "Sparkle brightness.");
+  desc(appearance.add(water.fog, "enabled").name("fog.enabled"),    "Atmospheric fade of distant water into sky horizon.");
+  desc(appearance.add(water.fog, "fadeStart", 50, 1500, 10).name("fog.fadeStart"),  "Distance (m) where atmospheric fog begins.");
+  desc(appearance.add(water.fog, "fadePower", 0.3, 4, 0.05).name("fog.fadePower"),  "Fog falloff curve. <1 = faster, >1 = slower.");
 
-  // Reflection (planar mirror) — controls how strongly props ghost onto water.
   const reflectionFolder = gui.addFolder("Reflection");
-  reflectionFolder.add(water.reflection, "strength", 0, 1, 0.01).name("strength");
-  reflectionFolder.add(water.reflection, "fadeStart", 5, 500, 1).name("fadeStart (m)");
-  reflectionFolder.add(water.reflection, "fadeEnd", 50, 2000, 5).name("fadeEnd (m)");
-  reflectionFolder.add(water.reflection, "distortionStrength", 0, 3, 0.05).name("distortion");
+  reflectionFolder.domElement.title = "Planar mirror reflection — controls how strongly props ghost onto water.";
+  desc(reflectionFolder.add(water.reflection, "strength", 0, 1, 0.01).name("strength"),  "0 = no reflection, 1 = full mirror. 0.5 is balanced.");
+  desc(reflectionFolder.add(water.reflection, "fadeStart", 5, 500, 1).name("fadeStart (m)"),  "Distance where reflection starts fading. Closer water = clear mirror, distant = atmospheric haze.");
+  desc(reflectionFolder.add(water.reflection, "fadeEnd",   50, 2000, 5).name("fadeEnd (m)"),  "Distance where reflection fully fades to sky horizon.");
+  desc(reflectionFolder.add(water.reflection, "distortionStrength", 0, 3, 0.05).name("distortion"),  "How much waves wobble the reflection. 0 = perfect mirror, 1 = natural, 2+ = stormy.");
 
   const skyFolder = gui.addFolder("Sky");
+  skyFolder.domElement.title = "Sun position, atmosphere, clouds. Sky type fixed at startup via ?sky=rayleigh URL param.";
   const skyProxy = {
     sunElevation: preset.sky.sun.elevation,
     sunAzimuth: preset.sky.sun.azimuth,
     cloudCoverage: preset.sky.clouds.coverage,
     sunIntensity: preset.sky.sun.intensity,
+    turbidity: useOfficialSky ? sky._mesh.turbidity.value : preset.sky.atmosphere.turbidity,
+    rayleigh: useOfficialSky ? sky._mesh.rayleigh.value : preset.sky.atmosphere.rayleighCoefficient,
+    showSunDisc: useOfficialSky ? !!sky._mesh.showSunDisc.value : true,
+    cloudDensity: useOfficialSky ? sky._mesh.cloudDensity.value : 0.5,
+    cloudElevation: useOfficialSky ? sky._mesh.cloudElevation.value : 0.5,
+    cloudSpeed: useOfficialSky ? sky._mesh.cloudSpeed.value : 0.0001,
   };
-  skyFolder.add(skyProxy, "sunElevation", 0, 90, 0.5).onChange(() => sky.setSunFromAngles(skyProxy.sunElevation, skyProxy.sunAzimuth));
-  skyFolder.add(skyProxy, "sunAzimuth", 0, 360, 1).onChange(() => sky.setSunFromAngles(skyProxy.sunElevation, skyProxy.sunAzimuth));
-  skyFolder.add(skyProxy, "cloudCoverage", 0, 1, 0.01).onChange((v) => (sky.cloudUniforms.coverage.value = v));
-  skyFolder.add(skyProxy, "sunIntensity", 0, 3, 0.05).onChange((v) => (sky.sunUniforms.intensity.value = v));
+  desc(skyFolder.add(skyProxy, "sunElevation", 0, 90, 0.5),
+    "Sun angle above horizon. 0 = horizon (sunset), 90 = directly overhead.")
+    .onChange(() => sky.setSunFromAngles(skyProxy.sunElevation, skyProxy.sunAzimuth));
+  desc(skyFolder.add(skyProxy, "sunAzimuth", 0, 360, 1),
+    "Sun direction around the horizon in degrees. 0/360 = +Z, 90 = +X.")
+    .onChange(() => sky.setSunFromAngles(skyProxy.sunElevation, skyProxy.sunAzimuth));
+  desc(skyFolder.add(skyProxy, "cloudCoverage", 0, 1, 0.01),
+    "Fraction of sky covered by clouds. 0 = clear, 1 = overcast.")
+    .onChange((v) => (sky.cloudUniforms.coverage.value = v));
+  if (useOfficialSky) {
+    desc(skyFolder.add(skyProxy, "showSunDisc"),
+      "Toggle the sun disc rendering. Off = atmospheric glow only (no white spot).")
+      .onChange((v) => (sky._mesh.showSunDisc.value = v ? 1 : 0));
+    desc(skyFolder.add(skyProxy, "turbidity", 1, 20, 0.1),
+      "Atmospheric haze. Low = clear, high = dusty/foggy sky.")
+      .onChange((v) => (sky._mesh.turbidity.value = v));
+    desc(skyFolder.add(skyProxy, "rayleigh", 0, 4, 0.05),
+      "Blue scattering strength. Higher = bluer sky.")
+      .onChange((v) => (sky._mesh.rayleigh.value = v));
+    desc(skyFolder.add(skyProxy, "cloudDensity", 0, 1, 0.01),
+      "How opaque the clouds are inside their coverage area.")
+      .onChange((v) => (sky._mesh.cloudDensity.value = v));
+    desc(skyFolder.add(skyProxy, "cloudElevation", 0, 0.7, 0.01),
+      "Cloud layer apparent distance. Despite the name, the SkyMesh shader makes clouds appear LOWER/CLOSER as this rises (it scales 1/(y*elevation) in cloudUV). 0=clouds high & small, 0.5=natural, 0.7+=clouds wrap around and clip the sun horizon. Range capped at 0.7 to avoid the sun-cut-in-half artifact.")
+      .onChange((v) => (sky._mesh.cloudElevation.value = v));
+    desc(skyFolder.add(skyProxy, "cloudSpeed", 0, 0.001, 0.00001),
+      "Cloud drift speed. Very small numbers — 0.0001 is normal wind.")
+      .onChange((v) => (sky._mesh.cloudSpeed.value = v));
+  } else {
+    desc(skyFolder.add(skyProxy, "sunIntensity", 0, 3, 0.05),
+      "Sun brightness multiplier (RayleighSky only — SkyMesh has its own calibration).")
+      .onChange((v) => (sky.sunUniforms.intensity.value = v));
+  }
 
   const qualityFolder = gui.addFolder("Quality");
   const qState = { level: "high" };
   qualityFolder.add(qState, "level", ["low", "medium", "high", "ultra"]).onChange(async (v) => { await water.setQualityLevel(v); });
   qualityFolder.add(water, "wireframe");
-  qualityFolder.add(renderer, "toneMappingExposure", 0.2, 2.5, 0.05).name("exposure");
+  // (exposure lives in the top Display folder now.)
 
   // ---------- Custom Presets (save / load / delete / import / export) ----------
   // Persists to browser localStorage so user-tuned looks survive refreshes.
@@ -645,17 +734,6 @@ async function main() {
     water.resize(window.innerWidth, window.innerHeight);
   });
 
-  // ---- Post-processing pipeline ----
-  // Bloom — restricted to HDR-bright pixels so only the sun specular and the
-  // strongest sun reflections glow. Foam and white props stay crisp.
-  const postProcessing = new THREE.PostProcessing(renderer);
-  const scenePass = pass(scene, camera);
-  let outputNode = scenePass.getTextureNode("output");
-  // (strength, radius, threshold) — note BloomNode API has threshold as 3rd arg
-  const bloomPass = bloom(outputNode, 0.18, 0.6, 1.1);
-  outputNode = outputNode.add(bloomPass);
-  postProcessing.outputNode = outputNode;
-
   // Apply wetness to all scene props that touch the water. The wetness shader
   // samples the persistent foam RT + height-above-waterline so rocks/palms/boats
   // get darker + glossier near the waterline and where waves splash on them.
@@ -689,7 +767,9 @@ async function main() {
         scene.fog.density = 0.0018;
       }
     }
-    renderer.toneMappingExposure = underwater ? 1.05 : 1.0;
+    // Apply a small underwater brighten on top of the user's chosen base
+    // exposure so the slider in the Display folder isn't overwritten every frame.
+    renderer.toneMappingExposure = exposureState.base * (underwater ? 1.05 : 1.0);
     // Drift underwater particles with the camera and only show below water.
     underwaterParticles.visible = underwater;
     if (underwater) {
