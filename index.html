@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Three.js Water Pro (clone)</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; }
+      body { overflow: hidden; background: #000; color: #fff; font-family: -apple-system, system-ui, sans-serif; }
+      canvas { display: block; }
+      #info {
+        position: fixed; top: 12px; left: 12px; z-index: 10;
+        background: rgba(0,0,0,0.55); padding: 10px 14px; border-radius: 8px;
+        max-width: 360px; font-size: 12px; line-height: 1.45;
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(255,255,255,0.08);
+      }
+      #info h1 { font-size: 14px; margin-bottom: 4px; font-weight: 600; }
+      #info code { background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+      #info .muted { opacity: 0.65; }
+      #fps { position: fixed; top: 12px; right: 12px; z-index: 10;
+        background: rgba(0,0,0,0.55); padding: 6px 10px; border-radius: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+      #boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        background: radial-gradient(ellipse at center, #0a3a5c 0%, #000 80%); z-index: 100;
+        flex-direction: column; gap: 12px; transition: opacity 0.6s; }
+      #boot.gone { opacity: 0; pointer-events: none; }
+      #boot .title { font-size: 22px; font-weight: 600; letter-spacing: 0.04em; }
+      #boot .sub { font-size: 12px; opacity: 0.7; }
+      .spinner { width: 36px; height: 36px; border: 3px solid rgba(255,255,255,0.15); border-top-color: #4dd4ff;
+        border-radius: 50%; animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div id="boot">
+      <div class="spinner"></div>
+      <div class="title">Three.js Water Pro</div>
+      <div class="sub">Compiling shaders…</div>
+    </div>
+    <div id="info">
+      <h1>Three.js Water Pro · clone</h1>
+      <div class="muted">WebGPU/TSL ocean — Gerstner waves, multi-layer foam, Rayleigh sky, buoyancy. API mirrors <code>threejs-water-pro</code>.</div>
+      <div class="muted" style="margin-top:6px">Drag to orbit · scroll to zoom · use the right panel to tweak.</div>
+    </div>
+    <div id="fps">— fps</div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

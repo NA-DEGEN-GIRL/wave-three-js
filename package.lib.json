@@ -1,0 +1,28 @@
+{
+  "name": "threejs-water-pro-clone",
+  "version": "0.9.0",
+  "description": "Real-time WebGPU/TSL ocean simulation for Three.js — Gerstner+JONSWAP waves, persistent foam, planar reflection, refraction, sky, buoyancy.",
+  "type": "module",
+  "main": "./dist/water-pro.umd.cjs",
+  "module": "./dist/water-pro.js",
+  "types": "./dist/water-pro.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/water-pro.js",
+      "require": "./dist/water-pro.umd.cjs",
+      "types": "./dist/water-pro.d.ts"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "keywords": ["three.js", "webgpu", "ocean", "water", "tsl", "shader", "fft", "jonswap", "gerstner", "foam", "caustics", "wave"],
+  "license": "MIT",
+  "peerDependencies": {
+    "three": ">=0.181.0"
+  },
+  "scripts": {
+    "build:lib": "vite build --config vite.lib.config.js",
+    "build:demo": "vite build",
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "preview": "vite preview --host 0.0.0.0 --port 4173"
+  }
+}
