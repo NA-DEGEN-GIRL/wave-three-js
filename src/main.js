@@ -206,7 +206,10 @@ async function main() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.95;
+  // SkyMesh's atmosphere is calibrated for low exposure (the official example
+  // uses 0.1). 0.5 keeps the sun + sky contrast believable without darkening
+  // the rest of the scene too much.
+  renderer.toneMappingExposure = 0.5;
   document.body.appendChild(renderer.domElement);
   await renderer.init();
 
@@ -301,18 +304,22 @@ async function main() {
   // in SkyMesh's expected range.
   const presetToSkyMeshCloudSpeed = (s) => (s ?? 0.02) * 0.003; // 0.02 → 0.00006
 
+  // SkyMesh has its own calibrated defaults (turbidity=10, rayleigh=2). Old
+  // RayleighSky-tuned preset values would push it into unphysical territory
+  // (black zenith, blown-out sun). We use SkyMesh defaults and only let the
+  // preset influence sun position + cloud coverage.
   const sky = useOfficialSky
     ? new OfficialSky({
         elevation: preset.sky.sun.elevation,
         azimuth: preset.sky.sun.azimuth,
-        turbidity: Math.max(2, preset.sky.atmosphere.turbidity * 2.5),
-        rayleigh: preset.sky.atmosphere.rayleighCoefficient * 2,
-        mieCoefficient: preset.sky.atmosphere.mieCoefficient,
-        mieDirectionalG: preset.sky.atmosphere.mieDirectionalG,
-        cloudCoverage: preset.sky.clouds.coverage,
-        cloudDensity: preset.sky.clouds.intensity ?? 0.5,
-        cloudElevation: preset.sky.clouds.height ?? 0.5,
-        cloudScale: preset.sky.clouds.scale ?? 0.0002,
+        turbidity: 10,
+        rayleigh: 2,
+        mieCoefficient: 0.005,
+        mieDirectionalG: 0.8,
+        cloudCoverage: preset.sky.clouds.enabled === false ? 0 : (preset.sky.clouds.coverage ?? 0.4),
+        cloudDensity: 0.5,
+        cloudElevation: 0.5,
+        cloudScale: 0.0002,
         cloudSpeed: presetToSkyMeshCloudSpeed(preset.sky.clouds.speed),
         showSunDisc: true,
       })
