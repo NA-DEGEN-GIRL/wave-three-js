@@ -294,6 +294,13 @@ async function main() {
   // webgpu_ocean example and gives a noticeably richer look than our custom
   // RayleighSky. Falls back to RayleighSky via ?sky=rayleigh URL param.
   const useOfficialSky = urlParams.get("sky") !== "rayleigh";
+  // SkyMesh wants tiny `cloudSpeed` values (default 0.0001 = subtle drift).
+  // Our presets use 0.02-scale numbers tuned for the old RayleighSky cloud
+  // system, which would fly across the sky 200x too fast. Scale down with a
+  // damping factor so preset values still influence relative speed but stay
+  // in SkyMesh's expected range.
+  const presetToSkyMeshCloudSpeed = (s) => (s ?? 0.02) * 0.003; // 0.02 → 0.00006
+
   const sky = useOfficialSky
     ? new OfficialSky({
         elevation: preset.sky.sun.elevation,
@@ -306,7 +313,7 @@ async function main() {
         cloudDensity: preset.sky.clouds.intensity ?? 0.5,
         cloudElevation: preset.sky.clouds.height ?? 0.5,
         cloudScale: preset.sky.clouds.scale ?? 0.0002,
-        cloudSpeed: preset.sky.clouds.speed ?? 0.0001,
+        cloudSpeed: presetToSkyMeshCloudSpeed(preset.sky.clouds.speed),
         showSunDisc: true,
       })
     : new RayleighSky(preset.sky);

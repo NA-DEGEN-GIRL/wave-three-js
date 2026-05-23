@@ -318,20 +318,14 @@ export class WaterSystem {
     // is what makes foam STREAKS LINGER — the commercial-grade core mechanic.
     this.foamSim = new FoamSimulation({ resolution: 1024, worldSize: 200, decayRate: 0.7 });
 
-    // Tessendorf FFT cascade — optional add-on; samples a Phillips-spectrum
-    // displacement texture in the vertex shader to enhance the Gerstner waves
-    // with statistically-driven micro detail. Disabled in `low` quality to keep
-    // the CPU cost down on weak devices.
-    this.fft = (this.config.fftWaves > 0) ? new OceanFFT({
-      N: this.config.fftWaves >= 256 ? 64 : 32, // CPU IFFT — keep N modest
-      L: 80,
-      windSpeed: 18,
-      windDirection: 0.7,
-      amplitude: 0.0008,
-    }) : null;
-    this._fftTexture = this.fft ? texture(this.fft.displacementTexture) : null;
-    this._fftStrength = uniform(0.6);
-    this._fftPatchSize = uniform(this.fft ? this.fft.patchSize : 80);
+    // Tessendorf FFT cascade — opt-in. The CPU IFFT can add vertex displacement
+    // on top of Gerstner that compounds into fast-moving crests if not tuned
+    // for the scene, so we default to OFF. Enable explicitly via
+    // `water.enableFFT()` from user code, or pick the "ultra" quality tier.
+    this.fft = null;
+    this._fftTexture = null;
+    this._fftStrength = uniform(0.0);
+    this._fftPatchSize = uniform(80);
 
     // Camera near/far uniforms for depth linearisation in the shader.
     this._cameraNear = uniform(camera.near);
@@ -342,6 +336,10 @@ export class WaterSystem {
     this._isUnderwater = uniform(0);
     this._buildMesh();
     this._attachFoamSim();
+
+    // Auto-enable FFT only for the "ultra" quality tier. Must come AFTER
+    // _buildMesh / _attachFoamSim so the rebuild it triggers has valid state.
+    if (this.quality === "ultra") this.enableFFT();
 
     this.buoyancy = new BuoyancySystem(new WaveSampler(() => ({
       waves: this.gerstner.waves,
@@ -1051,6 +1049,36 @@ export class WaterSystem {
     })();
 
     return mat;
+  }
+
+  /**
+   * Turn on the Tessendorf FFT cascade. Builds an OceanFFT instance and starts
+   * sampling its displacement texture in the vertex shader. Off by default
+   * since the look already comes from Gerstner+FBM; FFT is an opt-in extra
+   * for users who want statistically-driven micro detail.
+   */
+  enableFFT(opts = {}) {
+    if (this.fft) return;
+    this.fft = new OceanFFT({
+      N: 64,
+      L: opts.patchSize ?? 80,
+      windSpeed: this.waves.windSpeed.value,
+      windDirection: this.waves.windDirection.value,
+      amplitude: opts.amplitude ?? 0.0006,
+    });
+    this._fftTexture = texture(this.fft.displacementTexture);
+    this._fftPatchSize.value = this.fft.patchSize;
+    this._fftStrength.value = opts.strength ?? 0.25;
+    this._rebuildWaveNodes(); // rebuild material to pick up the new texture node
+  }
+
+  disableFFT() {
+    if (!this.fft) return;
+    this.fft.dispose();
+    this.fft = null;
+    this._fftTexture = null;
+    this._fftStrength.value = 0;
+    this._rebuildWaveNodes();
   }
 
   // -------- Lifecycle --------

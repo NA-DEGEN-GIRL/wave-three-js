@@ -47,6 +47,11 @@ export class OfficialSky {
     mesh.frustumCulled = false;
     mesh.renderOrder = -1000;
     mesh.userData.underwater = false;
+    // CRITICAL: disable scene fog on the sky material. Without this, scene.fog
+    // (FogExp2) at the sky sphere's distance (10000 units after scaling) fades
+    // the sky to 100% fog colour — making the whole sky look gray with no sun
+    // or clouds visible.
+    if (mesh.material) mesh.material.fog = false;
 
     // Tune uniforms.
     mesh.turbidity.value        = params.turbidity        ?? 10;
