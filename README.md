@@ -48,10 +48,10 @@
 - **GGX-narrow sun specular** + 가로 anisotropic sun bar streak
 - **Sparkle** (high-freq glitter)
 
-#### Sky
-- **Rayleigh + Mie procedural sky** (TSL)
-- **Sun disc** + 작은 halo
-- **Volumetric-style 구름** (FBM + 시간 drift + sun direction shading)
+#### Sky (2가지 선택)
+- **`OfficialSky` (기본)** — three.js master의 `SkyMesh`를 vendor한 wrapper. Hosek-Wilkie 풍 atmosphere + 빌트인 volumetric cloud layer. 공식 `webgpu_ocean` 예제와 동일한 sky.
+- **`RayleighSky`** (대안) — 직접 구현한 Rayleigh+Mie procedural sky. `?sky=rayleigh`로 전환.
+- **Sun disc** 자동 위치 + halo
 - 10 preset (tranquil/tropical/sunset/moonlit/choppy/storm/hurricane/arctic/foggy/seaOfThieves)
 
 #### Underwater
@@ -186,8 +186,9 @@ Open-source reimplementation of the commercial `threejs-water-pro` library, mirr
 - GGX-narrow sun specular + anisotropic sun-bar streak
 - Sparkle (high-freq glitter)
 
-**Sky**
-- Procedural Rayleigh + Mie sky (TSL), sun disc + halo, volumetric-style FBM clouds
+**Sky (two options)**
+- **`OfficialSky` (default)** — wraps three.js master's `SkyMesh` (Hosek-Wilkie atmosphere + volumetric clouds). Same sky used in the official `webgpu_ocean` example.
+- **`RayleighSky`** (alternative) — our custom Rayleigh+Mie procedural sky. Switch with `?sky=rayleigh`.
 - 10 environment presets
 
 **Underwater (activates when `camera.y < 0`)**
