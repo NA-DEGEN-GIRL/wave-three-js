@@ -18,7 +18,7 @@ import {
   Fn, vec2, vec3, vec4, float, uniform, normalize, dot, cross, mix, clamp,
   pow, sin, cos, length, smoothstep, max, min, abs, fract, floor, exp,
   positionLocal, positionWorld, cameraPosition, uv, time, sub, add,
-  texture, screenUV, cameraViewMatrix, mat3,
+  texture, screenUV, cameraViewMatrix, mat3, step,
 } from "three/tsl";
 
 import { getQualityConfig } from "./QualityLevels.js";
@@ -28,6 +28,7 @@ import { OceanFloor } from "./OceanFloor.js";
 import { WaterReflector } from "./Reflector.js";
 import { RefractionPass } from "./RefractionPass.js";
 import { FoamSimulation } from "./FoamSimulation.js";
+import { OceanFFT } from "./OceanFFT.js";
 
 const DEFAULT_GRID = { levels: 1, segments: 192, baseSize: 1600 };
 
@@ -317,6 +318,21 @@ export class WaterSystem {
     // is what makes foam STREAKS LINGER — the commercial-grade core mechanic.
     this.foamSim = new FoamSimulation({ resolution: 1024, worldSize: 200, decayRate: 0.7 });
 
+    // Tessendorf FFT cascade — optional add-on; samples a Phillips-spectrum
+    // displacement texture in the vertex shader to enhance the Gerstner waves
+    // with statistically-driven micro detail. Disabled in `low` quality to keep
+    // the CPU cost down on weak devices.
+    this.fft = (this.config.fftWaves > 0) ? new OceanFFT({
+      N: this.config.fftWaves >= 256 ? 64 : 32, // CPU IFFT — keep N modest
+      L: 80,
+      windSpeed: 18,
+      windDirection: 0.7,
+      amplitude: 0.0008,
+    }) : null;
+    this._fftTexture = this.fft ? texture(this.fft.displacementTexture) : null;
+    this._fftStrength = uniform(0.6);
+    this._fftPatchSize = uniform(this.fft ? this.fft.patchSize : 80);
+
     // Camera near/far uniforms for depth linearisation in the shader.
     this._cameraNear = uniform(camera.near);
     this._cameraFar = uniform(camera.far);
@@ -349,22 +365,43 @@ export class WaterSystem {
 
   // -------- Geometry / material --------
   _buildMesh() {
-    if (this._mesh) {
-      this.scene.remove(this._mesh);
-      this._mesh.geometry.dispose();
-      this._material?.dispose();
+    // Remove previous ring meshes (if any).
+    if (this._meshes) {
+      for (const m of this._meshes) {
+        this.scene.remove(m);
+        m.geometry.dispose();
+      }
     }
-    const { segments, baseSize } = this._geomConfig;
-    // Subdivide more near centre for shore detail — simple flat plane is fine for now.
-    const geom = new THREE.PlaneGeometry(baseSize, baseSize, segments, segments);
-    geom.rotateX(-Math.PI / 2);
+    this._material?.dispose();
 
+    const { levels, segments, baseSize } = this._geomConfig;
     const mat = this._buildMaterial();
     this._material = mat;
-    this._mesh = new THREE.Mesh(geom, mat);
-    this._mesh.frustumCulled = false;
-    this._mesh.renderOrder = 0;
-    if (this.scene) this.scene.add(this._mesh);
+    this._meshes = [];
+
+    // Build `levels` nested rings, each 2x the previous size. Same vertex count
+    // per ring → density per area drops geometrically toward the horizon.
+    // Innermost ring is fully tessellated; outer rings use cheaper material
+    // (same mat for now — variations are a possible future optimisation).
+    const ringCount = Math.max(1, levels | 0);
+    for (let i = 0; i < ringCount; i++) {
+      const size = baseSize * Math.pow(2, i);
+      const segs = Math.max(8, segments);
+      const geom = new THREE.PlaneGeometry(size, size, segs, segs);
+      geom.rotateX(-Math.PI / 2);
+      const m = new THREE.Mesh(geom, mat);
+      m.frustumCulled = false;
+      // Outer rings render BENEATH inner ones (lower renderOrder draws first when
+      // depth-tested, but with overlap we rely on depth for correctness).
+      m.renderOrder = i; // inner = 0 (drawn first), outer larger
+      this._meshes.push(m);
+      if (this.scene) this.scene.add(m);
+    }
+
+    // Backward-compat: `this._mesh` points at the INNER ring (highest detail).
+    // Code that references it (e.g. reflector hide list) uses this; other rings
+    // are added to the reflection hide list explicitly in update().
+    this._mesh = this._meshes[0];
   }
 
   _rebuildWaveNodes() {
@@ -593,10 +630,22 @@ export class WaterSystem {
       const nMicroV = fbmMicro(pMicroV);
       const extraYMicro = nMicroV.x.sub(0.5).mul(microAmp.mul(windScale2).mul(1.2));
 
+      // FFT displacement texture (Tessendorf): sample the Phillips-spectrum
+      // height field at the tiled world XZ. The texture wraps with patchSize
+      // = L, so the surface tiles seamlessly. Channels: (dy, dx, dz, _).
+      let fftDx = float(0), fftDy = float(0), fftDz = float(0);
+      if (this._fftTexture) {
+        const fftUV = vec2(wx, wz).div(this._fftPatchSize);
+        const fftSample = texture(this._fftTexture, fftUV);
+        fftDy = fftSample.r.mul(this._fftStrength);
+        fftDx = fftSample.g.mul(this._fftStrength);
+        fftDz = fftSample.b.mul(this._fftStrength);
+      }
+
       return vec3(
-        positionLocal.x.add(w.x),
-        positionLocal.y.add(w.y).add(extraYMid).add(extraYMicro),
-        positionLocal.z.add(w.z),
+        positionLocal.x.add(w.x).add(fftDx),
+        positionLocal.y.add(w.y).add(extraYMid).add(extraYMicro).add(fftDy),
+        positionLocal.z.add(w.z).add(fftDz),
       );
     })();
 
@@ -642,18 +691,61 @@ export class WaterSystem {
       const skyColPure = mix(horizonTint, u.skyZenith, horizonMix).toVar();
 
       // ---- Planar reflection from the Reflector pass ----
-      // Distortion grows with view distance because wave-aggregate over a long
-      // ray breaks the mirror image up more. Multiplier exposed as a tunable.
       const camDist = length(pWorld.xz.sub(cameraPosition.xz));
       const distortionScale = float(0.022).add(smoothstep(float(40.0), float(400.0), camDist).mul(0.06))
         .mul(u.reflectionDistortion);
       const refUV = screenUV.add(vec2(n.x, n.z).mul(distortionScale));
-      const reflSample = texture(this.reflector.target.texture, refUV).rgb;
+      const planarReflSample = texture(this.reflector.target.texture, refUV).rgb;
 
-      // Reflection contribution fades with distance (waves destroy coherent mirror).
-      // Both the start/end of the fade AND the master strength are now uniforms so
-      // users can dial down reflections that look too intrusive (e.g. islands
-      // ghosting on the water surface around rocks).
+      // ---- SSR (screen-space reflection ray-march) ----
+      // March the REFLECTED view direction in screen space, sampling RefractionPass
+      // depth at each step. When the marched depth catches up with the scene depth,
+      // we've intersected a real scene object — sample its colour for the reflection.
+      // This catches local detail (rocks, boats above water) more accurately than
+      // the planar pass and adds parallax. We BLEND planar+SSR for robustness:
+      // SSR fills near-field detail, planar handles distant + horizon.
+      const ssrColor = vec3(0.0).toVar();
+      const ssrHit = float(0.0).toVar();
+      if (this.config.ssr) {
+        // World-space reflected direction from this fragment.
+        const viewToFrag = normalize(pWorld.sub(cameraPosition));
+        const ssrRayDir = normalize(viewToFrag.sub(n.mul(float(2.0).mul(dot(viewToFrag, n)))));
+        // Step length grows with distance for a cheap LoD.
+        const maxSteps = 12;
+        const stepWorld = float(0.6).add(camDist.mul(0.01)); // 0.6m near, more at distance
+        // Walk in world space, project to screen each step, compare depths.
+        const projPlane = float(1.0).div(max(viewToFrag.y.negate().abs().add(0.05), 0.05));
+        for (let s = 1; s <= maxSteps; s++) {
+          const tWorld = float(s).mul(stepWorld);
+          const samplePosW = pWorld.add(ssrRayDir.mul(tWorld));
+          // Project to clip (view → NDC via cameraViewMatrix × projection. We don't
+          // have proj matrix as uniform here, but ScreenUV is the current frag's
+          // projected pos. Instead use a simple approximation: shift screenUV by
+          // the planar projection of the world-space step onto the screen plane).
+          const stepViewOffset = cameraViewMatrix.mul(vec4(samplePosW.sub(pWorld), 0)).xy;
+          const sampleUV = screenUV.add(stepViewOffset.mul(projPlane.mul(0.04)));
+          const sampledDepth = texture(this.refraction.target.depthTexture, sampleUV).r;
+          const sampledViewZ = this._cameraNear.mul(this._cameraFar).div(
+            this._cameraFar.sub(sampledDepth.mul(this._cameraFar.sub(this._cameraNear)))
+          );
+          // Marched view-space Z at this step.
+          const marchedViewPos = cameraViewMatrix.mul(vec4(samplePosW, 1.0));
+          const marchedViewZ = marchedViewPos.z.negate();
+          // Hit when marched depth has caught/exceeded scene depth (occluded).
+          const occluded = step(sampledViewZ, marchedViewZ);
+          // Only count first hit (use ssrHit gate to prevent later steps overriding).
+          const newHit = occluded.mul(float(1.0).sub(ssrHit));
+          ssrColor.assign(mix(ssrColor, texture(this.refraction.target.texture, sampleUV).rgb, newHit));
+          ssrHit.assign(max(ssrHit, occluded));
+        }
+      }
+
+      // Combine planar + SSR. SSR has higher quality in the near field;
+      // planar has full coverage for far / horizon pixels.
+      const ssrWeight = ssrHit.mul(u.ssrStrength).mul(smoothstep(float(120.0), float(20.0), camDist));
+      const reflSample = mix(planarReflSample, ssrColor, ssrWeight);
+
+      // Reflection contribution fades with distance.
       const reflectionFade = float(1.0).sub(smoothstep(u.reflectionFadeStart, u.reflectionFadeEnd, camDist));
       const reflectionMix = reflectionFade.mul(u.reflectionStrength);
       const skyCol = mix(skyColPure, reflSample, reflectionMix).toVar();
@@ -968,6 +1060,15 @@ export class WaterSystem {
     this._timeAccum += deltaTime * speed;
     this._tShader.value = this._timeAccum;
 
+    // Per-frame FFT step (CPU IFFT for the MVP — see OceanFFT GPU upgrade path).
+    if (this.fft) {
+      this.fft.setParameters({
+        windSpeed: this.waves.windSpeed.value,
+        windDirection: this.waves.windDirection.value,
+      });
+      this.fft.update(this._timeAccum);
+    }
+
     // CPU-side derived uniform updates (saves ~20 ALU per fragment per frame).
     const ws = Math.max(1, this.waves.windSpeed.value);
     const windScaleVal = Math.min(2.5, Math.max(0.4, Math.pow(ws * 0.07, 0.55)));
@@ -977,9 +1078,19 @@ export class WaterSystem {
     const sd = this.sun.direction.value;
     this._cpuDerived.sunDirNorm.value.copy(sd).normalize();
 
-    if (this.cameraTracking && this._mesh && this.camera) {
+    if (this.cameraTracking && this._meshes && this.camera) {
       const cx = this.camera.position.x, cz = this.camera.position.z;
-      this._mesh.position.set(cx, 0, cz);
+      // Snap each ring to the camera. To avoid swimming-vertex artifacts on
+      // larger rings, quantise each ring's position to its own grid step.
+      for (let i = 0; i < this._meshes.length; i++) {
+        const m = this._meshes[i];
+        const size = this._geomConfig.baseSize * Math.pow(2, i);
+        const segs = this._geomConfig.segments;
+        const cellSize = size / segs;
+        const sx = Math.round(cx / cellSize) * cellSize;
+        const sz = Math.round(cz / cellSize) * cellSize;
+        m.position.set(sx, 0, sz);
+      }
       this._gridOffset.value.set(cx, 0, cz);
       this.floor.getMesh().position.set(cx, this.floor.getMesh().position.y, cz);
     }
@@ -996,18 +1107,19 @@ export class WaterSystem {
     // objects (kelp, particles, anything BELOW y=0 should not appear in the
     // above-water reflection).
     if (this.reflector && this.camera.position.y >= 0) {
-      const hides = [this._mesh, this.floor.getMesh()];
-      // Auto-include everything tagged `userData.underwater = true`.
+      // Hide ALL water ring meshes + floor + tagged underwater objects.
+      const hides = [...(this._meshes ?? [this._mesh]), this.floor.getMesh()];
       this.scene.traverse((o) => {
         if (o.userData && o.userData.underwater) hides.push(o);
       });
       this.reflector.update(this.renderer, this.scene, this.camera, hides);
     }
-    // Refraction pass: render scene minus water from main camera. We keep the
-    // ocean floor in this pass so refraction shows the seabed.
     if (this.refraction) {
-      this.refraction.update(this.renderer, this.scene, this.camera, [this._mesh]);
+      const hides = [...(this._meshes ?? [this._mesh])];
+      this.refraction.update(this.renderer, this.scene, this.camera, hides);
     }
+    // (Refraction pass moved into the conditional block above so it hides ALL
+    // ring meshes, not just the inner one.)
     // Foam simulation step — runs one ping-pong pass to evolve persistent foam.
     if (this.foamSim) {
       // Build wake sources from buoyancy-tracked objects with userData.wakeStrength.
@@ -1105,9 +1217,11 @@ export class WaterSystem {
 
   async dispose() {
     this._disposed = true;
-    if (this._mesh) {
-      this.scene.remove(this._mesh);
-      this._mesh.geometry.dispose();
+    if (this._meshes) {
+      for (const m of this._meshes) {
+        this.scene.remove(m);
+        m.geometry.dispose();
+      }
       this._material?.dispose();
     }
     if (this.floor) { this.scene.remove(this.floor.getMesh()); this.floor.dispose(); }
