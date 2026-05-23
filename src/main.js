@@ -12,6 +12,7 @@ import {
 } from "./lib/index.js";
 import { makeSeaweed, makeUnderwaterParticles } from "./lib/OceanFloor.js";
 import { applyWetness } from "./lib/WetMaterial.js";
+import { SprayParticles } from "./lib/SprayParticles.js";
 
 // ---------- procedural assets ----------
 
@@ -302,9 +303,11 @@ async function main() {
   const props = new THREE.Group();
   scene.add(props);
 
-  // Hero boat
+  // Hero boat — moves in a circle so the wake foam is visible behind it.
   const boat = makeBoat(0x2cb6b0);
   boat.position.set(8, 0, 4);
+  boat.userData.wakeStrength = 1.0; // emits wake foam when moving
+  const ship = boat;
   props.add(boat);
   water.buoyancy.addObject(boat, { heightOffset: -0.6, rotationInfluence: 0.7, multiPoint: true, heightSmoothing: 0.18, rotationSmoothing: 0.18 });
   // Secondary boat farther away
@@ -330,6 +333,11 @@ async function main() {
   const underwaterParticles = makeUnderwaterParticles({ count: 600, radius: 35 });
   underwaterParticles.userData.underwater = true;
   scene.add(underwaterParticles);
+
+  // Above-surface spray particles — visible white mist where waves crash on
+  // boats/rocks. Spawned proportional to per-object wake strength.
+  const spray = new SprayParticles({ maxParticles: 600 });
+  scene.add(spray.getObject());
 
   // Sprinkle seaweed across the ocean floor. Tagged underwater so it doesn't
   // appear mirrored on the water surface from above.
@@ -558,6 +566,17 @@ async function main() {
     }
 
     await water.update(dt);
+
+    // Spawn spray particles from buoyancy objects that have wakeStrength.
+    const emitters = [];
+    for (const o of water.buoyancy._objects.values()) {
+      const m = o.mesh;
+      const ws = (m.userData && m.userData.wakeStrength) ?? 0;
+      if (ws <= 0) continue;
+      // Approximate "splash energy" from how much the buoyancy moved the boat this frame.
+      emitters.push({ x: m.position.x, y: 0.4, z: m.position.z, strength: ws * 0.4 });
+    }
+    spray.update(dt, emitters);
 
     postProcessing.render();
 

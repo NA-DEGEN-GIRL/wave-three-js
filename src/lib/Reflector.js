@@ -8,6 +8,42 @@
 import * as THREE from "three/webgpu";
 
 const _reflectMatrix = new THREE.Matrix4().makeScale(1, -1, 1);
+const _clipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // y >= 0 (water plane)
+const _clipPlaneView = new THREE.Vector4();
+const _q = new THREE.Vector4();
+const _tmpProj = new THREE.Matrix4();
+
+/**
+ * Modify the projection matrix in-place to clip against an arbitrary plane,
+ * given in EYE/view space, per Eric Lengyel's "Modifying the Projection Matrix
+ * to Perform Oblique Near-plane Clipping" (Game Programming Gems 5, 2004).
+ *
+ * This makes the mirror camera's near clip plane align with the water plane,
+ * which means anything below water is automatically clipped from the reflection
+ * pass — no need for the user to tag every underwater object with userData.
+ */
+function applyObliqueClip(projectionMatrix, clipPlaneView) {
+  const m = projectionMatrix.elements;
+  // Compute the perpendicular point in clip space corresponding to the plane.
+  _q.set(
+    (Math.sign(clipPlaneView.x) + m[8]) / m[0],
+    (Math.sign(clipPlaneView.y) + m[9]) / m[5],
+    -1.0,
+    (1.0 + m[10]) / m[14],
+  );
+  // c = clipPlaneView * (2 / dot(clipPlaneView, q))
+  const dot = clipPlaneView.x * _q.x + clipPlaneView.y * _q.y + clipPlaneView.z * _q.z + clipPlaneView.w * _q.w;
+  const s = 2.0 / dot;
+  const cx = clipPlaneView.x * s;
+  const cy = clipPlaneView.y * s;
+  const cz = clipPlaneView.z * s;
+  const cw = clipPlaneView.w * s;
+  // Replace 3rd row of projection: M[2] = c - M[3]
+  m[2] = cx;
+  m[6] = cy;
+  m[10] = cz + 1.0;
+  m[14] = cw;
+}
 
 export class WaterReflector {
   constructor({ resolution = 1024 } = {}) {
@@ -54,6 +90,18 @@ export class WaterReflector {
     this.mirrorCam.matrixWorldInverse.copy(this.mirrorCam.matrixWorld).invert();
     this.mirrorCam.projectionMatrix.copy(mainCam.projectionMatrix);
     this.mirrorCam.projectionMatrixInverse.copy(mainCam.projectionMatrixInverse);
+
+    // OBLIQUE NEAR-PLANE CLIPPING (Lengyel 2004) — clip anything below the water
+    // plane (y=0) in the mirror camera's frustum. This replaces the need to tag
+    // every underwater object with `userData.underwater`. Reflection now shows
+    // ONLY what's above the water surface, automatically.
+    _clipPlane.set(new THREE.Vector3(0, 1, 0), 0);
+    // Transform clip plane into mirror-camera EYE space.
+    const planeNormal = _clipPlane.normal;
+    const planeConstant = _clipPlane.constant;
+    _clipPlaneView.set(planeNormal.x, planeNormal.y, planeNormal.z, planeConstant)
+      .applyMatrix4(this.mirrorCam.matrixWorldInverse.clone().transpose());
+    applyObliqueClip(this.mirrorCam.projectionMatrix, _clipPlaneView);
 
     // Hide the water plane (and anything else the caller wants hidden) so it
     // doesn't appear in its own reflection.

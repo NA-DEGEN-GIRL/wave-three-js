@@ -149,57 +149,88 @@ export class RayleighSky {
     });
   }
 
-  // Volumetric-ish cloud overlay: project view dir onto a high-altitude plane,
-  // sample FBM noise, light with sun direction, and return vec4(rgb, alpha).
+  // Volumetric-ish cloud overlay using REAL 3D value-noise (not 2D-projected).
+  // Three altitude layers stacked for parallax depth.
   _cloudFn() {
     const cu = this.cloudUniforms;
     const sunDir = this.sunUniforms.direction;
     const t = time;
 
-    const hash22 = Fn(([p]) => {
-      const x = fract(sin(dot(p, vec3(127.1, 311.7, 74.7))).mul(43758.5453));
-      const y = fract(sin(dot(p, vec3(269.5, 183.3, 246.1))).mul(43758.5453));
-      return vec3(x, y, float(0));
+    // True 3D hash (all 3 components contribute).
+    const hash3 = Fn(([p]) => {
+      return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))).mul(43758.5453));
     });
-    const noise3 = Fn(([p]) => {
+    // Trilinear value noise over a 3D lattice — proper volumetric.
+    const noise3D = Fn(([p]) => {
       const i = floor(p).toVar();
       const f = p.sub(i).toVar();
       const u = f.mul(f).mul(f.mul(-2.0).add(3.0));
-      const a = hash22(i).x;
-      const b = hash22(i.add(vec3(1, 0, 0))).x;
-      const c = hash22(i.add(vec3(0, 0, 1))).x;
-      const d = hash22(i.add(vec3(1, 0, 1))).x;
-      const xa = mix(a, b, u.x);
-      const xb = mix(c, d, u.x);
-      return mix(xa, xb, u.z);
+      const n000 = hash3(i);
+      const n100 = hash3(i.add(vec3(1, 0, 0)));
+      const n010 = hash3(i.add(vec3(0, 1, 0)));
+      const n110 = hash3(i.add(vec3(1, 1, 0)));
+      const n001 = hash3(i.add(vec3(0, 0, 1)));
+      const n101 = hash3(i.add(vec3(1, 0, 1)));
+      const n011 = hash3(i.add(vec3(0, 1, 1)));
+      const n111 = hash3(i.add(vec3(1, 1, 1)));
+      const x00 = mix(n000, n100, u.x);
+      const x10 = mix(n010, n110, u.x);
+      const x01 = mix(n001, n101, u.x);
+      const x11 = mix(n011, n111, u.x);
+      const y0 = mix(x00, x10, u.y);
+      const y1 = mix(x01, x11, u.y);
+      return mix(y0, y1, u.z);
+    });
+
+    // FBM over the 3D noise.
+    const fbm3D = Fn(([p]) => {
+      let amp = float(0.5).toVar();
+      let freq = float(1.0).toVar();
+      let sum = float(0).toVar();
+      const pv = p.toVar();
+      for (let i = 0; i < 5; i++) {
+        sum.addAssign(noise3D(pv.mul(freq)).mul(amp));
+        freq.assign(freq.mul(cu.lacunarity));
+        amp.assign(amp.mul(cu.persistence));
+      }
+      return sum;
     });
 
     return Fn(([viewDirInput]) => {
       const v = normalize(viewDirInput).toVar();
-      // Don't sample clouds if looking below the horizon.
       const aboveHoriz = smoothstep(cu.height.sub(0.15), cu.height.add(0.05), v.y);
 
-      // Project to cloud plane at unit height.
-      const proj = vec3(v.x.div(max(v.y, 0.05)), float(0.0), v.z.div(max(v.y, 0.05)));
+      // Project view ray to THREE altitude shells and sample each — gives parallax depth.
+      // Each shell uses a different vertical slice of the same 3D noise volume.
       const drift = t.mul(cu.speed).mul(100.0);
-      const p0 = vec3(proj.x.add(drift), float(0), proj.z.add(drift.mul(0.6))).mul(cu.scale.mul(1000.0)).toVar();
+      const baseScale = cu.scale.mul(800.0);
 
-      let amp = float(0.5).toVar();
-      let freq = float(1.0).toVar();
-      let sum = float(0).toVar();
-      for (let i = 0; i < 5; i++) {
-        sum.addAssign(noise3(p0.mul(freq)).mul(amp));
-        freq.assign(freq.mul(cu.lacunarity));
-        amp.assign(amp.mul(cu.persistence));
-      }
+      // Low layer (near horizon, larger structure, slow drift).
+      const proj1 = vec3(v.x.div(max(v.y, 0.05)), float(0.3), v.z.div(max(v.y, 0.05)));
+      const p1 = vec3(proj1.x.add(drift), proj1.y, proj1.z.add(drift.mul(0.6))).mul(baseScale);
+      const d1 = fbm3D(p1);
 
-      // Coverage threshold + intensity curve.
-      const density = clamp(sum.sub(float(1.0).sub(cu.coverage)).mul(float(3.0).mul(cu.intensity)), 0.0, 1.0);
+      // Mid layer (most visible mass).
+      const proj2 = vec3(v.x.div(max(v.y, 0.06)).mul(0.6), float(0.6), v.z.div(max(v.y, 0.06)).mul(0.6));
+      const p2 = vec3(proj2.x.add(drift.mul(0.8)), proj2.y, proj2.z.add(drift.mul(0.5))).mul(baseScale.mul(1.3));
+      const d2 = fbm3D(p2);
+
+      // High layer (cirrus-like, faint, fast drift).
+      const proj3 = vec3(v.x.div(max(v.y, 0.08)).mul(0.35), float(0.9), v.z.div(max(v.y, 0.08)).mul(0.35));
+      const p3 = vec3(proj3.x.add(drift.mul(1.4)), proj3.y, proj3.z.add(drift.mul(0.9))).mul(baseScale.mul(2.2));
+      const d3 = fbm3D(p3);
+
+      // Composite shells — each contributes additively before density curve.
+      const rawDensity = d1.mul(0.5).add(d2.mul(0.35)).add(d3.mul(0.15));
+      const density = clamp(rawDensity.sub(float(1.0).sub(cu.coverage)).mul(float(3.0).mul(cu.intensity)), 0.0, 1.0);
       const alpha = density.mul(aboveHoriz).mul(cu.enabled);
 
-      // Self-shadowing: clouds darker on the side facing away from sun (cheap approx).
+      // Self-shadowing via Beer's law: thicker patches darker. Combined with
+      // sun-facing brightness factor for cheap volumetric lighting.
       const sunFactor = clamp(dot(v, sunDir), 0.0, 1.0);
-      const shading = mix(cu.shadowColor, cu.color, smoothstep(float(0.0), float(0.6), sunFactor).mul(0.6).add(density.mul(0.4)));
+      const beerLaw = exp(density.mul(float(2.0)).negate()); // [0..1], thicker → 0
+      const litFactor = smoothstep(float(0.0), float(0.6), sunFactor).mul(beerLaw.mul(0.5).add(0.5));
+      const shading = mix(cu.shadowColor, cu.color, litFactor.mul(0.7).add(density.mul(0.3)));
       // Sunset warming when sun is low.
       const sunsetTint = vec3(1.0, 0.7, 0.5).mul(pow(clamp(float(0.4).sub(sunDir.y), 0, 1), float(2.0))).mul(0.6);
       const finalCol = shading.add(sunsetTint.mul(density));

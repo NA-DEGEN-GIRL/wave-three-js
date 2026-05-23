@@ -18,7 +18,7 @@ import {
   Fn, vec2, vec3, vec4, float, uniform, normalize, dot, cross, mix, clamp,
   pow, sin, cos, length, smoothstep, max, min, abs, fract, floor, exp,
   positionLocal, positionWorld, cameraPosition, uv, time, sub, add,
-  texture, screenUV, cameraViewMatrix,
+  texture, screenUV, cameraViewMatrix, mat3,
 } from "three/tsl";
 
 import { getQualityConfig } from "./QualityLevels.js";
@@ -496,6 +496,81 @@ export class WaterSystem {
       return vec4(n, detJ);
     });
 
+    // ---- Combined wave-field evaluator (PERF) ----
+    // Runs the swell+ripple sum ONCE, producing displacement, normal AND
+    // Jacobian-determinant in a single pass. Used by fragment shader; the
+    // vertex shader still calls evalGerstner alone since it only needs disp.
+    const evalWaveField = Fn(([worldXZ]) => {
+      const disp = vec3(0).toVar();
+      const Bx = float(0).toVar();
+      const Bz = float(0).toVar();
+      const By = float(0).toVar();
+      const Jxx = float(0).toVar();
+      const Jzz = float(0).toVar();
+      const Jxz = float(0).toVar();
+      const foamSeed = float(0).toVar();
+      const windScale = min(max(pow(max(windSpeed, float(1)).mul(0.07), float(0.55)), float(0.4)), float(2.5));
+      for (const w of waves) {
+        const dirOffset = float(w.dirAngle);
+        const dir = windDir.add(dirOffset);
+        const dx = cos(dir);
+        const dz = sin(dir);
+        const k = float((2 * Math.PI) / w.wavelength);
+        const omega = float(Math.sqrt(9.81 * (2 * Math.PI) / w.wavelength));
+        const A = float(w.amplitude).mul(ampGlobal).mul(windScale);
+        const theta = k.mul(dx.mul(worldXZ.x).add(dz.mul(worldXZ.y))).sub(omega.mul(tNode)).add(float(w.phase));
+        const sinT = sin(theta);
+        const cosT = cos(theta);
+        const Q = float(w.steepness).mul(choppiness).div(float(waves.length));
+
+        // Displacement
+        disp.x.addAssign(Q.mul(A).mul(dx).mul(cosT));
+        disp.z.addAssign(Q.mul(A).mul(dz).mul(cosT));
+        disp.y.addAssign(A.mul(sinT));
+        // Normal derivatives
+        Bx.addAssign(dx.mul(k).mul(A).mul(cosT).negate());
+        Bz.addAssign(dz.mul(k).mul(A).mul(cosT).negate());
+        By.addAssign(Q.mul(k).mul(A).mul(sinT));
+        // Foam seed + Jacobian (swell only — ripples too noisy to break)
+        if (w.isSwell) {
+          foamSeed.addAssign(max(sinT.sub(float(0.72)), float(0)).mul(Q).mul(3.0));
+          const QAk = Q.mul(A).mul(k);
+          Jxx.addAssign(QAk.mul(dx).mul(dx).mul(sinT).negate());
+          Jzz.addAssign(QAk.mul(dz).mul(dz).mul(sinT).negate());
+          Jxz.addAssign(QAk.mul(dx).mul(dz).mul(sinT).negate());
+        }
+      }
+      // Add FBM micro-detail to normal (mid + micro octaves).
+      const windCos = cos(windDir); const windSin = sin(windDir);
+      const drift = tNode.mul(windScale);
+      const pMid = vec2(worldXZ.x.add(windCos.mul(drift.mul(0.5))),
+                        worldXZ.y.add(windSin.mul(drift.mul(0.5)))).mul(rippleFreq);
+      const nMid = fbmMid(pMid);
+      const effRippleAmp = rippleAmp.mul(windScale).mul(1.4);
+      Bx.addAssign(nMid.y.mul(effRippleAmp).negate());
+      Bz.addAssign(nMid.z.mul(effRippleAmp).negate());
+      const pMicro = vec2(worldXZ.x.add(windCos.mul(drift.mul(2.0))),
+                          worldXZ.y.add(windSin.mul(drift.mul(2.0)))).mul(microFreq);
+      const nMicro = fbmMicro(pMicro);
+      const effMicroAmp = microAmp.mul(windScale).mul(2.0);
+      Bx.addAssign(nMicro.y.mul(effMicroAmp).negate());
+      Bz.addAssign(nMicro.z.mul(effMicroAmp).negate());
+      const pTiny = vec2(worldXZ.x.mul(5.0).add(tNode.mul(0.8)),
+                         worldXZ.y.mul(5.0).add(tNode.mul(0.6)));
+      const nTiny = valueNoiseD(pTiny);
+      Bx.addAssign(nTiny.y.mul(windScale.mul(0.04)).negate());
+      Bz.addAssign(nTiny.z.mul(windScale.mul(0.04)).negate());
+
+      const n = normalize(vec3(Bx, float(1).sub(By).add(0.0001), Bz));
+      const detJ = float(1).add(Jxx).mul(float(1).add(Jzz)).sub(Jxz.mul(Jxz));
+      // Pack: row0=disp, row1=normal, row2=(foamSeed, jacobianDet, 0)
+      return mat3(
+        disp.x, disp.y, disp.z,
+        n.x, n.y, n.z,
+        foamSeed, detJ, float(0),
+      );
+    });
+
     // ---- Vertex displacement ----
     mat.positionNode = Fn(() => {
       const wx = positionLocal.x.add(this._gridOffset.x);
@@ -530,15 +605,25 @@ export class WaterSystem {
       const pWorld = positionWorld;
       const sampleXZ = vec2(pWorld.x, pWorld.z);
 
-      const normalSample = evalNormal(sampleXZ);
-      const n = normalize(normalSample.xyz).toVar();
-      const jacobianDet = normalSample.w;
-      // True whitecap mask: surface folding (J<1) — peaks at actual breaking waves,
-      // not just tall crests like the old sin-threshold proxy.
+      // PERF: combined wave-field evaluator — runs the swell+ripple loop ONCE
+      // instead of evalGerstner+evalNormal each iterating it independently.
+      // Returns mat3 packed as:
+      //   row0 = displacement (xyz)
+      //   row1 = normal.xyz (already normalized)
+      //   row2 = (foamSeed, jacobianDet, padding)
+      // Materialise the combined result so downstream nodes can index without
+      // forcing the loop to re-evaluate.
+      const field = evalWaveField(sampleXZ).toVar();
+      const wEval_x = field[0].x;
+      const wEval_y = field[0].y;
+      const wEval_z = field[0].z;
+      const n = vec3(field[1].x, field[1].y, field[1].z).toVar();
+      const foamSeedRaw = field[2].x;
+      const jacobianDet = field[2].y;
       const whitecap = clamp(float(1.0).sub(jacobianDet).mul(2.5), 0.0, 1.0).toVar();
-
-      const wEval = evalGerstner(sampleXZ);
-      const crestFoam = wEval.w.add(whitecap.mul(0.7));
+      // Mimic the previous evalGerstner return shape for the rest of the colorNode.
+      const wEval = vec4(wEval_x, wEval_y, wEval_z, foamSeedRaw);
+      const crestFoam = foamSeedRaw.add(whitecap.mul(0.7));
       const curvatureFoam = whitecap;
 
       // View / reflection
@@ -925,6 +1010,24 @@ export class WaterSystem {
     }
     // Foam simulation step — runs one ping-pong pass to evolve persistent foam.
     if (this.foamSim) {
+      // Build wake sources from buoyancy-tracked objects with userData.wakeStrength.
+      // Velocity-weighted: stationary boats emit nothing, fast boats emit full strength.
+      const wakeSrc = [];
+      for (const obj of this.buoyancy._objects.values()) {
+        const m = obj.mesh;
+        const ws = (m.userData && m.userData.wakeStrength) ?? 0;
+        if (ws <= 0) continue;
+        if (!m.userData._lastPos) {
+          m.userData._lastPos = m.position.clone();
+        }
+        const dx = m.position.x - m.userData._lastPos.x;
+        const dz = m.position.z - m.userData._lastPos.z;
+        const speed = Math.sqrt(dx * dx + dz * dz) / Math.max(0.001, deltaTime);
+        m.userData._lastPos.copy(m.position);
+        const strength = Math.min(1, speed * 0.15) * ws;
+        if (strength > 0.01) wakeSrc.push({ x: m.position.x, z: m.position.z, strength });
+      }
+      this.foamSim.setWakeSources(wakeSrc);
       this.foamSim.update(this.renderer, this.camera, deltaTime, this._timeAccum);
     }
 

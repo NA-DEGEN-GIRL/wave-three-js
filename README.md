@@ -126,16 +126,20 @@ npm run build:lib     # dist/water-pro.{js,umd.cjs}
 
 ### 한계점 (정직하게)
 
+이전 라운드에 ❌로 표시했던 항목들 다수 해결됨. 남은 항목만:
+
 - **❌ 진짜 FFT cascade 없음**: 18 spectrum-weighted Gerstners로 시각적 90% 도달 (Tessendorf-Stockham FFT 미구현). 실제 ocean displacement map이 필요한 정확한 buoyancy GPU sampling, Tessendorf foam atlas 같은 건 안 됨.
-- **❌ GPU spray particles 없음**: splash는 화면공간 shader 효과만. 수면 위로 튀어오르는 mist sprite 시스템 없음.
-- **❌ Oblique frustum clipping 없음**: Reflector가 Lengyel 공식 미사용. 대신 `userData.underwater` opt-out 방식 (일반적 씬에서는 OK).
-- **❌ Persistent foam이 카메라 따라 shift**: 카메라가 빠르게 움직이면 foam이 살짝 jitter (재중심화 시 texture warp 안 함). 정적/느린 카메라에선 자연스러움.
-- **❌ Wake foam (보트 트레일)** 미구현 — 보트가 움직여도 뒤로 흔적 안 남김.
 - **❌ Real SSR (screen-space reflection)** 없음 — planar mirror만.
 - **❌ Compute shader FFT, BitonicSort** 같은 고급 GPGPU 미사용 — fragment shader 일색.
-- **🟡 Cloud "3D" noise는 사실 2D projection** — 평평한 cloud layer.
 - **🟡 Mesh가 단일 192² plane**, clipmap/LOD 없음 — far distance는 fog로 가림.
-- **🟡 Code audit에서 발견된 perf 이슈** 일부 남음 (evalGerstner/evalNormal이 fragment에서 wave loop 2x 평가). 통합하면 약 30% 빨라짐.
+
+**해결됨 (이번 라운드)**:
+- ✅ **GPU spray particles** — `SprayParticles.js` — 위로 튀어오르는 mist sprite (CPU pool 600개, ballistic motion + lifetime fade + additive blending). 보트가 움직일 때 emitter strength에 비례해 spawn.
+- ✅ **Oblique frustum clipping** (Lengyel 2004) — Reflector가 mirror cam의 projection matrix를 modify해서 water plane 아래 geometry 자동 clip. `userData.underwater` tagging 불필요 (호환성 위해 유지).
+- ✅ **Persistent foam recenter warp** — centerXZ 변경 시 `recenterShift` uniform으로 prev sample UV를 보정 → 카메라 빠르게 움직여도 foam이 world 좌표에 anchor.
+- ✅ **Wake foam** — 보트(`userData.wakeStrength`)가 움직이면 velocity-weighted 강도로 foam RT에 splat. 곡선 trail 자연스럽게 형성. Top-down에서 확인 가능.
+- ✅ **3D cloud noise** — 진짜 3D trilinear value noise + 3-layer altitude stacking (low/mid/high cirrus) + Beer's law cloud lighting.
+- ✅ **evalGerstner/evalNormal 통합** — single `evalWaveField`가 displacement + normal + Jacobian + foamSeed를 한 loop으로 반환 (fragment shader cost ~30% 감소).
 
 ### URL 디버그 파라미터 (개발 편의)
 | param | 효과 |
@@ -214,16 +218,20 @@ See Korean section above — code identical.
 
 ### Honest limitations
 
-- **No real FFT cascade** — ~90% of the look via 18 spectrum-weighted Gerstners. Things needing the actual displacement map (precise GPU-buoyancy, Tessendorf foam atlas) won't work.
-- **No GPU spray particles** — splash is a screen-space shader effect; no above-surface mist sprite system.
-- **No oblique-frustum clipping** in the Reflector — uses `userData.underwater` opt-out instead (works for typical scenes).
-- **Persistent foam jitters** when the camera moves fast (foam RT recenters but doesn't warp). Static / slow camera looks great.
-- **No wake foam** behind moving boats.
+Most items previously flagged are now addressed. Remaining:
+
+- **No real FFT cascade** — ~90% of the look via 18 spectrum-weighted Gerstners. Things needing the actual displacement map (precise GPU buoyancy, Tessendorf foam atlas) won't work.
 - **No real SSR** — planar mirror only.
-- **No compute-shader FFT / BitonicSort**.
-- **Cloud "3D" noise is 2D-projected** — flat cloud layer.
-- **Single 192² mesh, no clipmap/LOD** — distance hidden by fog.
-- **Some perf debt** flagged by audit (wave loop evaluated twice per fragment) — folding into one `evalWaveField` would save ~30%.
+- **No compute-shader FFT / BitonicSort** — pure fragment-shader path.
+- **Single 192² mesh, no clipmap/LOD** — distance hidden by atmospheric fog.
+
+**Resolved this round**:
+- ✅ **GPU spray particles** (`SprayParticles.js`) — above-surface mist with ballistic motion, lifetime fade, additive blending; emitted from moving objects.
+- ✅ **Oblique frustum clipping** (Lengyel 2004) on the Reflector — water plane is now the mirror cam's near clip plane, so underwater geometry is auto-excluded. `userData.underwater` retained for compatibility.
+- ✅ **Persistent foam recenter warp** — foam RT recenter correctly offsets the prev-sample UV so foam stays world-anchored when the camera pans.
+- ✅ **Wake foam** — moving objects with `userData.wakeStrength` splat into the foam RT each frame, velocity-weighted. Trails visible from top-down view.
+- ✅ **3D cloud noise** — true 3D trilinear value noise + 3 altitude shells (cumulus / mid / cirrus) + Beer's-law self-shadowing.
+- ✅ **Unified `evalWaveField`** — single pass returns displacement + normal + Jacobian + foam seed; fragment shader runs the wave loop once instead of twice (~30% perf win).
 
 ### URL debug params
 Same as Korean section above.

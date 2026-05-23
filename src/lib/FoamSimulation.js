@@ -15,8 +15,10 @@
 import * as THREE from "three/webgpu";
 import {
   Fn, vec2, vec3, vec4, float, uniform, texture, uv, fract, floor, sin, cos,
-  dot, mix, clamp, max, min, abs, pow, exp, length,
+  dot, mix, clamp, max, min, abs, pow, exp, length, uniformArray,
 } from "three/tsl";
+
+const MAX_WAKE_SOURCES = 16;
 
 // Same hash & noise primitives as WaterSystem so birth term matches the
 // per-pixel foam pattern visually.
@@ -80,6 +82,10 @@ export class FoamSimulation {
     // Uniforms shared with the simulation material.
     this._u = {
       centerXZ:       uniform(new THREE.Vector2(0, 0)),
+      // UV-space offset from PREVIOUS centre to current centre. Subtracted from
+      // prev-sample UV so foam stays anchored to world coordinates when the camera
+      // moves — without this you'd see foam jitter / drift on fast pans.
+      recenterShift:  uniform(new THREE.Vector2(0, 0)),
       worldHalfSize:  uniform(worldSize * 0.5),
       decayRate:      uniform(decayRate),
       dt:             uniform(0.016),
@@ -92,6 +98,12 @@ export class FoamSimulation {
       waves:          [],    // populated when WaterSystem rebuilds
       birthRate:      uniform(0.65),
       birthThreshold: uniform(0.55), // Jacobian threshold below which foam is born
+      // Wake sources — moving boats splat foam at their position each frame.
+      // Each entry: vec3(worldX, worldZ, strength). Slots > wakeCount are skipped.
+      wakeSources:    uniformArray(new Array(MAX_WAKE_SOURCES).fill(new THREE.Vector3())),
+      wakeCount:      uniform(0),
+      wakeRadius:     uniform(1.6), // metres
+      wakeStrength:   uniform(2.5), // birth rate multiplier inside the wake radius
     };
 
     // Built when WaterSystem hands us waves+uniforms via attach()
@@ -182,26 +194,39 @@ export class FoamSimulation {
       // Reconstruct world XZ from quad UV ([0,1] → [-half, +half] centred on camera).
       const worldXZ = uv().mul(2.0).sub(1.0).mul(u.worldHalfSize).add(u.centerXZ);
 
-      // Advect: sample previous foam at the point that flowed INTO this texel,
-      // i.e. shift UV against the wave velocity.
+      // Sample previous foam:
+      //   1) Recenter shift — compensate for camera-driven centerXZ change so foam
+      //      stays anchored in world space (no drift jitter when panning).
+      //   2) Wave advection — shift UV against surface velocity so foam flows
+      //      naturally with the water.
       const v = evalVelocityXZ(worldXZ, u.tAccum);
-      const advectUVOffset = v.mul(u.dt).mul(0.5).div(u.worldHalfSize); // velocity → UV units
-      const prevUV = uv().sub(advectUVOffset);
+      const advectUVOffset = v.mul(u.dt).mul(0.5).div(u.worldHalfSize);
+      const prevUV = uv().add(u.recenterShift).sub(advectUVOffset);
       const prev = texture(this._prevTextureNode, prevUV);
 
       // Decay previous foam.
       const decayFactor = exp(u.decayRate.mul(u.dt).negate());
       const decayed = prev.r.mul(decayFactor);
 
-      // Birth: Jacobian < threshold = breaking. Smooth gate so foam appears
-      // gradually as a wave steepens.
+      // Birth from breaking waves (Jacobian fold).
       const detJ = evalJacobian(worldXZ, u.tAccum);
       const breakAmt = clamp(u.birthThreshold.sub(detJ).mul(2.5), 0.0, 1.0);
-      // Add a small turbulence-textured baseline so the birth has lace character,
-      // not just smooth blobs.
       const turbMod = turbulence2(worldXZ.mul(0.08));
       const lace = clamp(float(0.30).sub(turbMod).mul(8.0), 0.0, 1.0);
-      const birth = breakAmt.mul(lace.mul(0.7).add(0.3)).mul(u.birthRate).mul(u.dt);
+      const breakBirth = breakAmt.mul(lace.mul(0.7).add(0.3)).mul(u.birthRate);
+
+      // Birth from boat wakes — splat a small Gaussian at each active source.
+      // Unrolled loop over MAX_WAKE_SOURCES; entries past wakeCount have
+      // strength 0 (set by setWakeSources) and contribute nothing.
+      const wakeBirth = float(0).toVar();
+      for (let i = 0; i < MAX_WAKE_SOURCES; i++) {
+        const src = u.wakeSources.element(i);
+        const d = length(vec2(src.x, src.y).sub(worldXZ));
+        const falloff = clamp(float(1.0).sub(d.div(u.wakeRadius)), 0.0, 1.0);
+        wakeBirth.addAssign(falloff.mul(src.z).mul(u.wakeStrength));
+      }
+
+      const birth = breakBirth.add(wakeBirth).mul(u.dt);
 
       // Accumulate, clamp.
       const foam = clamp(decayed.add(birth), 0.0, 1.0);
@@ -236,6 +261,25 @@ export class FoamSimulation {
   setWorldSize(s) { this.worldSize = s; this._u.worldHalfSize.value = s * 0.5; }
 
   /**
+   * Register wake-emitting positions. Each source = (worldX, worldZ, strength).
+   * Up to MAX_WAKE_SOURCES (16) — extras are dropped.
+   * Typical use: call from WaterSystem.update() with current boat positions
+   * weighted by velocity magnitude (slow boat → tiny strength, fast boat → 1).
+   */
+  setWakeSources(sources) {
+    const arr = this._u.wakeSources.array;
+    const n = Math.min(sources.length, MAX_WAKE_SOURCES);
+    for (let i = 0; i < n; i++) {
+      const s = sources[i];
+      arr[i].set(s.x ?? 0, s.z ?? 0, s.strength ?? 0);
+    }
+    for (let i = n; i < MAX_WAKE_SOURCES; i++) {
+      arr[i].set(0, 0, 0); // zero out unused slots
+    }
+    this._u.wakeCount.value = n;
+  }
+
+  /**
    * Advance the simulation by one frame.
    * - `camera` is the main scene camera; we recentre the foam RT around it.
    * - `tAccum` is the same time accumulator the water uses (so phases match).
@@ -244,15 +288,18 @@ export class FoamSimulation {
     if (!this._attached) return;
     this._frame++;
 
-    // Re-centre the foam RT on the camera so the simulation always covers the
-    // visible water area. We shift the texture along with the camera so foam
-    // doesn't appear to drift when the camera moves.
-    const prevCenter = this._u.centerXZ.value;
+    // Re-centre the foam RT on the camera each frame.
+    const prevCenter = this._u.centerXZ.value.clone();
     const newCenter = new THREE.Vector2(camera.position.x, camera.position.z);
-    // (For a perfectly seamless re-centre we'd warp the texture by the delta;
-    // skip for the MVP — decay will smooth out any small jump.)
-    this._u.centerXZ.value = newCenter;
-    void prevCenter;
+    this._u.centerXZ.value.copy(newCenter);
+    // Compute the UV-space SHIFT that compensates for the centre move so the
+    // simulation reads the SAME world-XZ location from the previous frame's RT.
+    //   prevUV needs (newWorldXZ - prevCenter)/(2*halfSize) + 0.5
+    //         vs current uv = (newWorldXZ - newCenter)/(2*halfSize) + 0.5
+    //   → diff = (newCenter - prevCenter) / (2 * halfSize)
+    const dx = (newCenter.x - prevCenter.x) / (2 * this._u.worldHalfSize.value);
+    const dz = (newCenter.y - prevCenter.y) / (2 * this._u.worldHalfSize.value);
+    this._u.recenterShift.value.set(dx, dz);
 
     this._u.dt.value = Math.min(dt, 1 / 30); // clamp to avoid huge advect on tab-resume
     this._u.tAccum.value = tAccum;
