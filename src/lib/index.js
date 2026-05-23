@@ -7,6 +7,7 @@ import { RayleighSky } from "./RayleighSky.js";
 import { GradientSky } from "./GradientSky.js";
 import { getPresetParams, listPresets } from "./presets.js";
 import { QUALITY_LEVELS, getQualityConfig } from "./QualityLevels.js";
+import { snapshot, applySnapshot, PresetStore } from "./PresetStore.js";
 
 // Make `loadPreset("name")` work by wiring presets in here.
 const _origLoadPreset = WaterSystem.prototype.loadPreset;
@@ -26,4 +27,7 @@ export {
   listPresets,
   QUALITY_LEVELS,
   getQualityConfig,
+  snapshot,
+  applySnapshot,
+  PresetStore,
 };

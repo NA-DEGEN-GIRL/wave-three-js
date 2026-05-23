@@ -9,6 +9,9 @@ import {
   RayleighSky,
   getPresetParams,
   listPresets,
+  snapshot,
+  applySnapshot,
+  PresetStore,
 } from "./lib/index.js";
 import { makeSeaweed, makeUnderwaterParticles } from "./lib/OceanFloor.js";
 import { applyWetness } from "./lib/WetMaterial.js";
@@ -504,6 +507,102 @@ async function main() {
   qualityFolder.add(qState, "level", ["low", "medium", "high", "ultra"]).onChange(async (v) => { await water.setQualityLevel(v); });
   qualityFolder.add(water, "wireframe");
   qualityFolder.add(renderer, "toneMappingExposure", 0.2, 2.5, 0.05).name("exposure");
+
+  // ---------- Custom Presets (save / load / delete / import / export) ----------
+  // Persists to browser localStorage so user-tuned looks survive refreshes.
+  const store = new PresetStore();
+
+  const customFolder = gui.addFolder("Custom Presets");
+  const customState = {
+    name: "",
+    saved: store.list(),
+    selected: "",
+  };
+  let savedDropdownController = null;
+
+  // Refresh the saved-presets dropdown (must be recreated when list changes).
+  function refreshSavedDropdown() {
+    if (savedDropdownController) savedDropdownController.destroy();
+    customState.saved = store.list();
+    if (customState.saved.length === 0) customState.selected = "";
+    else if (!customState.saved.includes(customState.selected)) customState.selected = customState.saved[0];
+    savedDropdownController = customFolder
+      .add(customState, "selected", customState.saved.length ? customState.saved : [""])
+      .name("saved");
+    // Keep the controller order stable: move it to position #2 (after name input).
+    customFolder.children.splice(customFolder.children.indexOf(savedDropdownController), 1);
+    customFolder.children.splice(1, 0, savedDropdownController);
+    customFolder.$children.insertBefore(savedDropdownController.domElement, customFolder.$children.children[1]);
+  }
+
+  customFolder.add(customState, "name").name("name");
+  refreshSavedDropdown();
+
+  customFolder.add({ saveAs: () => {
+    const n = (customState.name || "").trim();
+    if (!n) { alert("Type a name first"); return; }
+    store.save(n, snapshot(water, sky));
+    customState.selected = n;
+    customState.name = "";
+    refreshSavedDropdown();
+    customFolder.controllers.forEach((c) => c.updateDisplay());
+    console.log(`Saved preset "${n}"`);
+  }}, "saveAs").name("💾 Save Current");
+
+  customFolder.add({ load: () => {
+    const sel = customState.selected;
+    if (!sel) { alert("No saved preset selected"); return; }
+    const snap = store.get(sel);
+    if (!snap) { alert("Preset not found"); return; }
+    applySnapshot(water, sky, snap);
+    gui.controllersRecursive().forEach((c) => c.updateDisplay && c.updateDisplay());
+    console.log(`Loaded preset "${sel}"`);
+  }}, "load").name("⬇️ Load Selected");
+
+  customFolder.add({ del: () => {
+    const sel = customState.selected;
+    if (!sel) { alert("No saved preset selected"); return; }
+    if (!confirm(`Delete preset "${sel}"?`)) return;
+    store.remove(sel);
+    refreshSavedDropdown();
+    console.log(`Deleted preset "${sel}"`);
+  }}, "del").name("🗑️ Delete Selected");
+
+  customFolder.add({ exportJson: () => {
+    const json = store.exportAll();
+    // Trigger a download.
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `wave-three-js-presets-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }}, "exportJson").name("📤 Export JSON");
+
+  customFolder.add({ importJson: () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json";
+    input.onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      try {
+        store.importAll(text);
+        refreshSavedDropdown();
+        alert(`Imported ${store.list().length} preset(s) total.`);
+      } catch (err) {
+        alert("Import failed: " + err.message);
+      }
+    };
+    input.click();
+  }}, "importJson").name("📥 Import JSON");
+
+  customFolder.add({ snapshotToConsole: () => {
+    console.log("Current snapshot:", snapshot(water, sky));
+    console.log("(Copy from devtools to share / version control.)");
+  }}, "snapshotToConsole").name("📋 Dump to Console");
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
