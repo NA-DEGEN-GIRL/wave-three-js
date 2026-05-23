@@ -7,6 +7,7 @@ import GUI from "lil-gui";
 import {
   WaterSystem,
   RayleighSky,
+  OfficialSky,
   getPresetParams,
   listPresets,
   snapshot,
@@ -288,7 +289,27 @@ async function main() {
     if (!isNaN(v)) water.foam.surface.coverage = v;
   }
 
-  const sky = new RayleighSky(preset.sky);
+  // Use the up-to-date three.js master SkyMesh (Hosek-Wilkie atmosphere +
+  // volumetric clouds). This is the same sky used in the official
+  // webgpu_ocean example and gives a noticeably richer look than our custom
+  // RayleighSky. Falls back to RayleighSky via ?sky=rayleigh URL param.
+  const useOfficialSky = urlParams.get("sky") !== "rayleigh";
+  const sky = useOfficialSky
+    ? new OfficialSky({
+        elevation: preset.sky.sun.elevation,
+        azimuth: preset.sky.sun.azimuth,
+        turbidity: Math.max(2, preset.sky.atmosphere.turbidity * 2.5),
+        rayleigh: preset.sky.atmosphere.rayleighCoefficient * 2,
+        mieCoefficient: preset.sky.atmosphere.mieCoefficient,
+        mieDirectionalG: preset.sky.atmosphere.mieDirectionalG,
+        cloudCoverage: preset.sky.clouds.coverage,
+        cloudDensity: preset.sky.clouds.intensity ?? 0.5,
+        cloudElevation: preset.sky.clouds.height ?? 0.5,
+        cloudScale: preset.sky.clouds.scale ?? 0.0002,
+        cloudSpeed: preset.sky.clouds.speed ?? 0.0001,
+        showSunDisc: true,
+      })
+    : new RayleighSky(preset.sky);
   scene.add(sky.getMesh());
   water.setSky(sky);
 

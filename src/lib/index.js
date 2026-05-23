@@ -5,6 +5,7 @@ import { BuoyancySystem } from "./Buoyancy.js";
 import { OceanFloor } from "./OceanFloor.js";
 import { RayleighSky } from "./RayleighSky.js";
 import { GradientSky } from "./GradientSky.js";
+import { OfficialSky } from "./OfficialSky.js";
 import { getPresetParams, listPresets } from "./presets.js";
 import { QUALITY_LEVELS, getQualityConfig } from "./QualityLevels.js";
 import { snapshot, applySnapshot, PresetStore } from "./PresetStore.js";
@@ -23,6 +24,7 @@ export {
   OceanFloor,
   RayleighSky,
   GradientSky,
+  OfficialSky,
   getPresetParams,
   listPresets,
   QUALITY_LEVELS,
