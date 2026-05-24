@@ -143,6 +143,13 @@ export class InteractiveWater {
       const edgeT = smoothstep(float(0.5).sub(float(texel * 4.0)), float(0.5), max(edge.x, edge.y));
       h_new.assign(h_new.mul(mix(float(1.0), float(0.94), edgeT)));
 
+      // Gentle global decay — multiplies the whole field by ~0.999 per step
+      // (~5 s half-life). Without this, asymmetric splats (hull dominates bow)
+      // slowly accumulate a DC bias that lifts/sinks the entire RT and shows
+      // up as a visible square footprint from high camera angles. The decay
+      // is small enough that propagating wave packets still look natural.
+      h_new.assign(h_new.mul(0.999));
+
       // Anti-runaway clamp.
       h_new.assign(clamp(h_new, float(-0.5), float(0.5)));
 

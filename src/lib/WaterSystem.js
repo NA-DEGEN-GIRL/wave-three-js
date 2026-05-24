@@ -656,8 +656,9 @@ export class WaterSystem {
       }
 
       // Interactive heightfield contribution (object-driven displacement).
-      // Sample the InteractiveWater RT at world XZ; mask cells outside the RT
-      // domain so distant verts don't pick up garbage edge-clamped values.
+      // Sample the InteractiveWater RT at world XZ. Uses SMOOTHSTEP edge fade
+      // over the outer ~8% of UV (≈16 m of the 200 m domain) so the RT
+      // boundary doesn't appear as a visible square seam from high angles.
       let interactiveDy = float(0);
       if (this.interactive) {
         const iHalf = this.interactive.halfSizeUniform;
@@ -666,9 +667,13 @@ export class WaterSystem {
           float(wx).sub(iCtr.x).div(iHalf).mul(0.5).add(0.5),
           float(wz).sub(iCtr.y).div(iHalf).mul(0.5).add(0.5),
         );
-        const iInBounds = step(0.0, iUV.x).mul(step(iUV.x, 1.0))
-                          .mul(step(0.0, iUV.y)).mul(step(iUV.y, 1.0));
-        interactiveDy = texture(this.interactive.currentTexture, iUV).r.mul(iInBounds);
+        // Smooth fade-in / fade-out instead of hard step(). 0.08 = inner edge.
+        const fadeIn  = smoothstep(float(0.0), float(0.08), iUV.x)
+                        .mul(smoothstep(float(0.0), float(0.08), iUV.y));
+        const fadeOut = smoothstep(float(1.0), float(0.92), iUV.x)
+                        .mul(smoothstep(float(1.0), float(0.92), iUV.y));
+        const iMask   = fadeIn.mul(fadeOut);
+        interactiveDy = texture(this.interactive.currentTexture, iUV).r.mul(iMask);
       }
 
       return vec3(

@@ -830,8 +830,11 @@ async function main() {
         const speed = Math.sqrt(vx * vx + vz * vz) / Math.max(0.001, dt);
         if (speed > 1.0) {
           // amp scales with KE, capped. sigma scales with hull beam.
-          const amp = 0.08 + Math.min(0.22, speed * 0.03) * ws;
-          water.interactive.splatImpulse(m.position.x, m.position.z, amp, 0.55);
+          // Smaller impulses — previous 0.08..0.30 m looked like dots from
+          // distance. 0.04..0.14 still seeds visible transient ripples up close
+          // without polluting the wide-view appearance.
+          const amp = 0.04 + Math.min(0.10, speed * 0.015) * ws;
+          water.interactive.splatImpulse(m.position.x, m.position.z, amp, 0.7);
           m.userData._lastSplashImpulse = 0;
         }
       }
