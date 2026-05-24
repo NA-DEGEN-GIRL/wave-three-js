@@ -19,7 +19,7 @@ import { applyWetness } from "./lib/WetMaterial.js";
 import { SprayParticles } from "./lib/SprayParticles.js";
 import { FishSchool } from "./lib/FishSchool.js";
 import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
-import { createRockMaterial, createSandMaterial } from "./lib/NaturalMaterials.js";
+import { createRockMaterial, createSandMaterial, paintRockColors, paintSandColors } from "./lib/NaturalMaterials.js";
 
 const _noise3 = new ImprovedNoise();
 function noise3D(x, y, z) { return _noise3.noise(x, y, z); }
@@ -77,14 +77,7 @@ function makeBoat(color = 0x2cb6b0) {
 // Initialised lazily on first use because it depends on the WaterSystem.
 let _rockMaterial = null;
 function getRockMaterial() {
-  if (!_rockMaterial) {
-    _rockMaterial = createRockMaterial({
-      // Let createRockMaterial supply the warmer default palette; the
-      // previous override was the desaturated grays the user reported.
-      scale: 0.22,
-      foamSim: _waterRef ? _waterRef.foamSim : null,
-    });
-  }
+  if (!_rockMaterial) _rockMaterial = createRockMaterial();
   return _rockMaterial;
 }
 // WaterSystem reference exported by main() so the lazy material init can
@@ -120,6 +113,8 @@ function makeRock(seed = 1) {
     pos.setZ(i, z * stretchZ * (1 + n));
   }
   geom.computeVertexNormals();
+  // Bake per-vertex colours (3-octave noise palette + slope-based moss).
+  paintRockColors(geom, { seed: seedOfs });
   const m = new THREE.Mesh(geom, getRockMaterial());
   m.castShadow = true; m.receiveShadow = false;
   return m;
@@ -269,10 +264,9 @@ function makeSandMound(radius, opts = {}) {
 function makeIsland({ radius = 12, palms = 4, rocks = 6, seed = Math.random() * 100 } = {}) {
   const g = new THREE.Group();
 
-  const sand = new THREE.Mesh(
-    makeSandMound(radius, { seed, centerHeight: 1.0 + Math.random() * 0.6 }),
-    getSandMaterial(),
-  );
+  const sandGeom = makeSandMound(radius, { seed, centerHeight: 1.0 + Math.random() * 0.6 });
+  paintSandColors(sandGeom);
+  const sand = new THREE.Mesh(sandGeom, getSandMaterial());
   g.add(sand);
 
   for (let i = 0; i < palms; i++) {
