@@ -92,8 +92,14 @@ function makeFishGeometry() {
   ]);
   const tail = new THREE.BufferGeometry();
   tail.setAttribute("position", new THREE.BufferAttribute(tailV, 3));
-  tail.translate(-0.6, 0, 0);   // attach the V vertex to the tail peduncle
+  // mergeGeometries() insists every input geometry has the SAME set of
+  // attributes. Cone/Icosahedron primitives include position+normal+uv,
+  // so the custom tail needs all three too. Compute normals first, then
+  // add a zero-uv attribute. (uv isn't used by the fish material but
+  // the merge would null-out otherwise.)
+  tail.translate(-0.6, 0, 0);
   tail.computeVertexNormals();
+  tail.setAttribute("uv", new THREE.BufferAttribute(new Float32Array((tailV.length / 3) * 2), 2));
 
   // -------------------- DORSAL --------------------
   // Bigger than before so it shows in side silhouette. Default Cone tip is
@@ -126,8 +132,8 @@ function makeFishGeometry() {
 
   // mergeGeometries() refuses a mix of indexed + non-indexed inputs.
   const merged = mergeGeometries([
-    body.toNonIndexed(),
-    tail,                       // already non-indexed (raw position attr only)
+    body,                       // IcosahedronGeometry is already non-indexed
+    tail,                       // custom, single-attr -> normal+uv added above
     dorsal.toNonIndexed(),
     anal.toNonIndexed(),
     finL.toNonIndexed(),
