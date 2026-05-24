@@ -18,6 +18,11 @@ import { makeSeaweed, makeUnderwaterParticles } from "./lib/OceanFloor.js";
 import { applyWetness } from "./lib/WetMaterial.js";
 import { SprayParticles } from "./lib/SprayParticles.js";
 import { FishSchool } from "./lib/FishSchool.js";
+import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
+import { createRockMaterial, createSandMaterial } from "./lib/NaturalMaterials.js";
+
+const _noise3 = new ImprovedNoise();
+function noise3D(x, y, z) { return _noise3.noise(x, y, z); }
 
 // ---------- procedural assets ----------
 
@@ -67,19 +72,57 @@ function makeBoat(color = 0x2cb6b0) {
   return grp;
 }
 
+// Module-level rock material — shared by every rock/pebble in the scene so
+// the GPU only compiles the procedural triplanar+moss+wet shader ONCE.
+// Initialised lazily on first use because it depends on the WaterSystem.
+let _rockMaterial = null;
+function getRockMaterial() {
+  if (!_rockMaterial) {
+    _rockMaterial = createRockMaterial({
+      // Slight bias toward warm tan to match the sunset preset palette
+      // without losing the gray rocks that dominate the FOAM-FINAL refs.
+      baseColors: [0x4d3d33, 0x7a6754, 0x9d8978],
+      mossColor: 0x4a6a39,
+      scale: 0.22,
+      foamSim: _waterRef ? _waterRef.foamSim : null,
+    });
+  }
+  return _rockMaterial;
+}
+// WaterSystem reference exported by main() so the lazy material init can
+// reach it. Set before any prop factories run.
+let _waterRef = null;
+
 function makeRock(seed = 1) {
-  const geom = new THREE.IcosahedronGeometry(2 + (seed % 3) * 0.7, 1);
+  const baseRadius = 2 + (seed % 3) * 0.7;
+  // Higher subdivision (level 2) gives ~320 triangles per rock — still cheap,
+  // but lets the multi-octave noise produce believable ridges and recesses
+  // instead of the old smooth-blob silhouette.
+  const geom = new THREE.IcosahedronGeometry(baseRadius, 2);
   const pos = geom.attributes.position;
+  // Per-rock random seeded stretching for shape variety.
+  const stretchX = 0.85 + ((seed * 7) % 13) / 13 * 0.5;
+  const stretchY = 0.7  + ((seed * 11) % 17) / 17 * 0.4;
+  const stretchZ = 0.85 + ((seed * 5) % 19) / 19 * 0.5;
+  const seedOfs = seed * 17.3;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-    const n = Math.sin(x * 1.7 + seed) * 0.15 + Math.cos(z * 1.3 + seed * 1.7) * 0.2 + Math.sin(y * 2.1 + seed * 0.7) * 0.15;
-    pos.setX(i, x * (1 + n));
-    pos.setY(i, y * (1 + n * 1.3));
-    pos.setZ(i, z * (1 + n));
+    // 4-octave Perlin displacement.
+    let n = 0, amp = 0.32, freq = 0.55;
+    for (let o = 0; o < 4; o++) {
+      n += noise3D(x * freq + seedOfs, y * freq + seedOfs * 1.7, z * freq + seedOfs * 0.4) * amp;
+      amp *= 0.52;
+      freq *= 2.07;
+    }
+    // Add an anisotropic ridge: vertical bands that read as stratification.
+    const ridge = Math.sin(y * 1.4 + seedOfs * 0.3) * 0.08;
+    n += ridge * (1 - Math.abs(y / baseRadius));
+    pos.setX(i, x * stretchX * (1 + n));
+    pos.setY(i, y * stretchY * (1 + n * 0.9));
+    pos.setZ(i, z * stretchZ * (1 + n));
   }
   geom.computeVertexNormals();
-  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(0.07, 0.4, 0.32), roughness: 0.92, metalness: 0.0 });
-  const m = new THREE.Mesh(geom, mat);
+  const m = new THREE.Mesh(geom, getRockMaterial());
   m.castShadow = true; m.receiveShadow = false;
   return m;
 }
@@ -160,15 +203,78 @@ function makePalmTree(scale = 1) {
   return g;
 }
 
-// Sandy beach island with rocks and palm trees
-function makeIsland({ radius = 12, palms = 4, rocks = 6 } = {}) {
+// Shared sand material — created lazily after WaterSystem exists.
+let _sandMaterial = null;
+function getSandMaterial() {
+  if (!_sandMaterial) _sandMaterial = createSandMaterial();
+  return _sandMaterial;
+}
+
+// Custom sand-mound geometry: concentric rings with noise-displaced heights.
+// Center is tallest, edges drop to (just above) the waterline. Each vertex
+// gets a per-position Perlin-noise bump to give the silhouette real character
+// instead of a perfectly smooth dome.
+function makeSandMound(radius, opts = {}) {
+  const rings = opts.rings ?? 10;
+  const segs  = opts.segments ?? 32;
+  const centerH = opts.centerHeight ?? Math.max(0.8, radius * 0.18);
+  const edgeH   = opts.edgeHeight   ?? -0.4;
+  const bumpStrength = opts.bumpStrength ?? 0.45;
+  const seed = opts.seed ?? Math.random() * 100;
+
+  const positions = [0, centerH, 0];
+  for (let r = 1; r <= rings; r++) {
+    const tr = r / rings;
+    const ringR = tr * radius;
+    // Smooth easing from center to edge — slight inward shoulder before drop-off.
+    const profile = Math.pow(1 - tr, 1.4);
+    const baseH = edgeH + (centerH - edgeH) * profile;
+    for (let s = 0; s < segs; s++) {
+      const a = (s / segs) * Math.PI * 2;
+      const x = Math.cos(a) * ringR;
+      const z = Math.sin(a) * ringR;
+      // 3-octave Perlin bump, stronger near center, fading at the edge.
+      let n = 0, amp = bumpStrength, freq = 0.35;
+      for (let o = 0; o < 3; o++) {
+        n += noise3D(x * freq + seed, 0, z * freq + seed * 0.7) * amp;
+        amp *= 0.5;
+        freq *= 2.1;
+      }
+      positions.push(x, baseH + n * (1 - tr * 0.6), z);
+    }
+  }
+  // Indices: triangle fan from center, then quad strips between rings.
+  const indices = [];
+  for (let s = 0; s < segs; s++) {
+    const sN = (s + 1) % segs;
+    indices.push(0, 1 + sN, 1 + s);
+  }
+  for (let r = 0; r < rings - 1; r++) {
+    for (let s = 0; s < segs; s++) {
+      const sN = (s + 1) % segs;
+      const i0 = 1 + r * segs + s;
+      const i1 = 1 + r * segs + sN;
+      const i2 = 1 + (r + 1) * segs + s;
+      const i3 = 1 + (r + 1) * segs + sN;
+      indices.push(i0, i3, i2, i0, i1, i3);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+// Sandy beach island: noise-displaced sand mound + palms + scattered rocks of
+// varied size around the periphery + a band of small pebbles at the waterline.
+function makeIsland({ radius = 12, palms = 4, rocks = 6, seed = Math.random() * 100 } = {}) {
   const g = new THREE.Group();
-  // Sand mound — flat ellipsoid
+
   const sand = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2),
-    new THREE.MeshStandardMaterial({ color: 0xd9b377, roughness: 1.0 }),
+    makeSandMound(radius, { seed, centerHeight: 1.0 + Math.random() * 0.6 }),
+    getSandMaterial(),
   );
-  sand.scale.set(1, 0.15, 1);
   g.add(sand);
 
   for (let i = 0; i < palms; i++) {
@@ -180,12 +286,23 @@ function makeIsland({ radius = 12, palms = 4, rocks = 6 } = {}) {
     g.add(t);
   }
   for (let i = 0; i < rocks; i++) {
-    const r = makeRock(i * 13 + Math.random() * 50);
+    const r = makeRock(i * 13 + Math.floor(Math.random() * 50));
     const ang = (i / rocks) * Math.PI * 2 + Math.random();
     const dist = radius * (0.6 + Math.random() * 0.4);
     r.position.set(Math.cos(ang) * dist, -0.3 + Math.random() * 1, Math.sin(ang) * dist);
     r.scale.setScalar(0.6 + Math.random() * 1.2);
     g.add(r);
+  }
+  // Pebble band — many small rocks scattered around the waterline. Cheap
+  // because they share the procedural rock material (1 compile, N instances
+  // via different Mesh objects but same Material).
+  for (let i = 0; i < 22; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const dist = radius * (0.88 + Math.random() * 0.28);
+    const p = makeRock(i * 7 + Math.floor(Math.random() * 100));
+    p.position.set(Math.cos(ang) * dist, -0.4 + Math.random() * 0.25, Math.sin(ang) * dist);
+    p.scale.setScalar(0.12 + Math.random() * 0.22);
+    g.add(p);
   }
   return g;
 }
@@ -260,6 +377,7 @@ async function main() {
 
   const water = await WaterSystem.create(renderer, scene, camera, "high");
   water.loadPreset(preset);
+  _waterRef = water;   // expose so getRockMaterial() can hook foamSim
 
   // Diagnostic URL params for verifying GUI plumbing.
   const contactOverride = urlParams.get("contact"); // e.g. 0, 1, 2
