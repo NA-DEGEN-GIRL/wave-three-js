@@ -2,6 +2,11 @@
 
 Onboarding guide for LLM agents (Claude, GPT, Gemini, etc.) inheriting this project.
 
+> **Picking up where the last session left off?** Read `HANDOFF.md` in the
+> repo root. It contains a current-state summary, the visual gap analysis
+> versus the commercial benchmark, the three quick wins ranked by impact,
+> and the architecture footguns to avoid.
+
 ## What this project is
 A from-scratch open-source reimplementation of the commercial `threejs-water-pro` library (API at `docs.threejswaterpro.com`). Three.js r181+ / WebGPU / TSL. The goal is a commercial-quality real-time ocean rendering library — Phillips/JONSWAP-weighted Gerstner waves, persistent foam accumulation RT, planar reflection, scene-depth refraction, Rayleigh sky, GPU buoyancy.
 
