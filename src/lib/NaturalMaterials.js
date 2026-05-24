@@ -85,9 +85,12 @@ const _cellDist = Fn(([p]) => {
  */
 export function createRockMaterial({
   scale = 0.22,
-  baseColors = [0x52453a, 0x7a6a55, 0x9b8770],
-  mossColor = 0x4d6b3a,
-  wetDarken = 0.45,
+  // Warmer / more saturated than the prior gray-browns. The defaults read
+  // as proper sandstone-leaning-granite under both sunset and tropical
+  // lighting, not the washed-out grays the previous palette produced.
+  baseColors = [0x6b4a30, 0x9c7d54, 0xc4a07c],
+  mossColor = 0x55763d,
+  wetDarken = 0.22,
   waterlineY = 0,
   foamSim = null,
 } = {}) {
@@ -140,10 +143,13 @@ export function createRockMaterial({
     const mossMask  = upFacing.mul(smoothstep(float(0.40), float(0.65), mossNoise));
     baseCol.assign(mix(baseCol, vec3(moss.r, moss.g, moss.b).mul(0.75), mossMask.mul(0.7)));
 
-    // Wet zone near waterline (between waterY-1.5 and waterY+1.0).
+    // Tight wet zone: a narrow band centred exactly on the waterline
+    // (about +/- 0.4 m), not a wide gradient — the previous 2.8 m band
+    // engulfed entire submerged outcrops and made them look like polished
+    // baduk stones rather than wet-splashed rock.
     const dyW = pw.y.sub(waterY);
-    const wetHeight = smoothstep(float(1.0), float(-0.4), dyW)
-                      .mul(smoothstep(float(-1.8), float(-0.6), dyW));
+    const wetHeight = smoothstep(float(0.5), float(0.0), dyW)
+                      .mul(smoothstep(float(-0.4), float(0.0), dyW));
     // Foam coupling — sample foam RT if provided.
     const wetFoam = float(0).toVar();
     if (foamSim) {
@@ -159,7 +165,7 @@ export function createRockMaterial({
                    .mul(smoothstep(float(0.98), float(0.94), fUV.x))
                    .mul(smoothstep(float(0.02), float(0.06), fUV.y))
                    .mul(smoothstep(float(0.98), float(0.94), fUV.y));
-      wetFoam.assign(texture(foamSim.currentTexture, fUV).r.mul(inB).mul(0.8));
+      wetFoam.assign(texture(foamSim.currentTexture, fUV).r.mul(inB).mul(0.3));
     }
     const wet = clamp(max(wetHeight, wetFoam), float(0.0), float(1.0));
     baseCol.assign(baseCol.mul(float(1.0).sub(wet.mul(wetDarken))));
@@ -167,13 +173,14 @@ export function createRockMaterial({
     return vec4(baseCol, 1.0);
   })();
 
-  // Wet zones are smoother (more reflective).
+  // Wet zones are slightly smoother — but never mirror-glossy. Floor at
+  // 0.65 keeps the surface reading as rock, not polished stone.
   mat.roughnessNode = Fn(() => {
     const pw = positionWorld;
     const dyW = pw.y.sub(waterY);
-    const wet = smoothstep(float(1.0), float(-0.4), dyW)
-                .mul(smoothstep(float(-1.8), float(-0.6), dyW));
-    return mix(float(0.92), float(0.40), wet);
+    const wet = smoothstep(float(0.5), float(0.0), dyW)
+                .mul(smoothstep(float(-0.4), float(0.0), dyW));
+    return mix(float(0.92), float(0.65), wet);
   })();
 
   return mat;
@@ -212,21 +219,26 @@ export function createSandMaterial({
     const grain     = _fbm5(p.mul(9.0));
     const variation = _fbm5(p.mul(1.4).add(vec2(2.7, 5.1)));
 
-    const col = mix(vec3(c1.r, c1.g, c1.b), vec3(c2.r, c2.g, c2.b), pow(variation, float(0.7))).toVar();
-    col.assign(col.mul(float(0.85).add(grain.mul(0.30))));
+    // No more pow(0.7) — that was biasing every pixel toward the darker
+    // tone and making the beach read as dull gray-brown. Linear mix keeps
+    // the warm tan dominant with patches of the shadow tone for variety.
+    const col = mix(vec3(c1.r, c1.g, c1.b), vec3(c2.r, c2.g, c2.b), variation).toVar();
+    col.assign(col.mul(float(0.92).add(grain.mul(0.22))));
 
     // Wave-pattern ridges near the water line — narrow horizontal bands.
     const dyW = pw.y.sub(waterY);
-    const closeToWater = smoothstep(float(0.6), float(-0.5), dyW)
-                          .mul(smoothstep(float(-1.2), float(-0.2), dyW));
+    const closeToWater = smoothstep(float(0.5), float(0.0), dyW)
+                          .mul(smoothstep(float(-0.4), float(0.0), dyW));
     const ripple = sin(pw.x.mul(0.6).add(_fbm5(p.mul(3.0)).mul(2.0))).mul(0.5).add(0.5);
     const rippleMask = pow(ripple, float(3.0)).mul(closeToWater).mul(0.18);
     col.assign(col.mul(float(1.0).sub(rippleMask)));
 
-    // Wet sand band.
-    const wet = smoothstep(float(0.3), float(-0.3), dyW)
-                .mul(smoothstep(float(-1.2), float(-0.4), dyW));
-    col.assign(mix(col, vec3(cWet.r, cWet.g, cWet.b), wet.mul(0.75)));
+    // Tight wet sand band — a strip right at the waterline, not the whole
+    // submerged half. Strength capped at 0.55 so the wet stripe doesn\'t
+    // look like wet paint.
+    const wet = smoothstep(float(0.4), float(0.0), dyW)
+                .mul(smoothstep(float(-0.3), float(0.0), dyW));
+    col.assign(mix(col, vec3(cWet.r, cWet.g, cWet.b), wet.mul(0.55)));
 
     return vec4(col, 1.0);
   })();
@@ -234,9 +246,10 @@ export function createSandMaterial({
   mat.roughnessNode = Fn(() => {
     const pw = positionWorld;
     const dyW = pw.y.sub(waterY);
-    const wet = smoothstep(float(0.3), float(-0.3), dyW)
-                .mul(smoothstep(float(-1.2), float(-0.4), dyW));
-    return mix(float(1.0), float(0.55), wet);
+    const wet = smoothstep(float(0.4), float(0.0), dyW)
+                .mul(smoothstep(float(-0.3), float(0.0), dyW));
+    // Floor at 0.75 — wet sand is matte, not glossy.
+    return mix(float(1.0), float(0.75), wet);
   })();
 
   return mat;

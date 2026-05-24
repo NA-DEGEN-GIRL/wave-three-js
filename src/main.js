@@ -79,10 +79,8 @@ let _rockMaterial = null;
 function getRockMaterial() {
   if (!_rockMaterial) {
     _rockMaterial = createRockMaterial({
-      // Slight bias toward warm tan to match the sunset preset palette
-      // without losing the gray rocks that dominate the FOAM-FINAL refs.
-      baseColors: [0x4d3d33, 0x7a6754, 0x9d8978],
-      mossColor: 0x4a6a39,
+      // Let createRockMaterial supply the warmer default palette; the
+      // previous override was the desaturated grays the user reported.
       scale: 0.22,
       foamSim: _waterRef ? _waterRef.foamSim : null,
     });
