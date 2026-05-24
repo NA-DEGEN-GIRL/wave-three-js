@@ -17,6 +17,7 @@ import {
 import { makeSeaweed, makeUnderwaterParticles } from "./lib/OceanFloor.js";
 import { applyWetness } from "./lib/WetMaterial.js";
 import { SprayParticles } from "./lib/SprayParticles.js";
+import { FishSchool } from "./lib/FishSchool.js";
 
 // ---------- procedural assets ----------
 
@@ -377,6 +378,18 @@ async function main() {
   const spray = new SprayParticles({ maxParticles: 600 });
   scene.add(spray.getObject());
 
+  // Underwater fish — one InstancedMesh with N procedural fish forming a few
+  // schools that wander around the camera. Tagged underwater so the planar
+  // reflection pass skips them (otherwise ghost fish would float in the sky).
+  const fish = new FishSchool({
+    count: 150,
+    nSchools: 6,
+    bounds: { radius: 90, depthMin: -7, depthMax: -2 },
+    swimSpeedRange: [0.4, 1.1],
+    sizeRange: [0.45, 1.1],
+  });
+  scene.add(fish.getObject());
+
   // Sprinkle seaweed across the ocean floor. Tagged underwater so it doesn't
   // appear mirrored on the water surface from above.
   for (let i = 0; i < 30; i++) {
@@ -655,6 +668,23 @@ async function main() {
     }}, "pulse").name("💥 Test pulse ring");
   }
 
+  // ---------- Fish (underwater life) ----------
+  const fishFolder = gui.addFolder("Fish");
+  const fishState = {
+    enabled: true,
+    count: 150,
+    swimSpeedScale: 1.0,
+  };
+  desc(fishFolder.add(fishState, "enabled"),
+    "Show / hide all fish. Cheap — just toggles a draw call.")
+    .onChange((v) => fish.setEnabled(v));
+  desc(fishFolder.add(fishState, "count", 0, 300, 1),
+    "Number of active fish. 50 = sparse, 150 = busy, 300 = full schools everywhere. No realloc cost.")
+    .onChange((v) => fish.setCount(v));
+  desc(fishFolder.add(fishState, "swimSpeedScale", 0, 3, 0.05),
+    "Multiplier on swim speed. 0 = frozen tableau, 1 = natural, 3 = panicked.")
+    .onChange((v) => fish.setSwimSpeedScale(v));
+
   const qualityFolder = gui.addFolder("Quality");
   const qState = { level: "high" };
   qualityFolder.add(qState, "level", ["low", "medium", "high", "ultra"]).onChange(async (v) => { await water.setQualityLevel(v); });
@@ -840,6 +870,7 @@ async function main() {
       }
     }
     spray.update(dt, emitters);
+    fish.update(dt, { x: camera.position.x, z: camera.position.z }, now / 1000);
 
     postProcessing.render();
 
