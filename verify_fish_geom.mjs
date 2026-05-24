@@ -9,34 +9,51 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 // Re-implement makeFishGeometry but build each piece SEPARATELY so we
 // can inspect bounds per piece (the merged geom drops the per-piece info).
 function buildPieces() {
-  const body = new THREE.IcosahedronGeometry(0.35, 1);
-  body.scale(2.0, 0.75, 0.5);
+  const body = new THREE.IcosahedronGeometry(0.45, 2);
+  body.scale(1.9, 0.95, 0.7);
+  const peakX = 0.15, sigmaFront = 0.78, sigmaBack = 0.45;
+  const pos = body.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const t = x - peakX;
+    const sigma = t >= 0 ? sigmaFront : sigmaBack;
+    const w = 0.12 + 0.88 * Math.exp(-(t * t) / (sigma * sigma));
+    pos.setY(i, pos.getY(i) * w);
+    pos.setZ(i, pos.getZ(i) * w);
+  }
+  body.computeVertexNormals();
 
-  const tail = new THREE.ConeGeometry(0.4, 0.6, 4);
-  tail.rotateZ(Math.PI / 2);
-  tail.scale(1, 1, 0.14);
-  tail.translate(-0.7, 0, 0);
+  const tw = 0.6, th = 0.55, ny = 0.10;
+  const tailV = new Float32Array([
+    0, 0, 0,  -tw, +th * 0.55, 0,  -tw * 0.6, +ny, 0,
+    0, 0, 0,  -tw * 0.6, -ny, 0,  -tw, -th * 0.55, 0,
+    -tw * 0.6, +ny, 0,  -tw, +th * 0.55, 0,  -tw, -th * 0.55, 0,
+    -tw * 0.6, +ny, 0,  -tw, -th * 0.55, 0,  -tw * 0.6, -ny, 0,
+  ]);
+  const tail = new THREE.BufferGeometry();
+  tail.setAttribute('position', new THREE.BufferAttribute(tailV, 3));
+  tail.translate(-0.6, 0, 0);
 
-  const dorsal = new THREE.ConeGeometry(0.18, 0.35, 3);
-  dorsal.scale(0.55, 1, 0.13);
-  dorsal.translate(-0.15, 0.27, 0);
+  const dorsal = new THREE.ConeGeometry(0.28, 0.42, 3);
+  dorsal.scale(0.85, 1, 0.10);
+  dorsal.translate(-0.15, 0.30, 0);
 
-  const anal = new THREE.ConeGeometry(0.12, 0.2, 3);
+  const anal = new THREE.ConeGeometry(0.14, 0.22, 3);
   anal.rotateZ(Math.PI);
-  anal.scale(0.5, 1, 0.12);
-  anal.translate(-0.4, -0.26, 0);
+  anal.scale(0.55, 1, 0.10);
+  anal.translate(-0.42, -0.24, 0);
 
-  const finL = new THREE.ConeGeometry(0.14, 0.28, 3);
+  const finL = new THREE.ConeGeometry(0.16, 0.32, 3);
   finL.rotateX(Math.PI / 2);
-  finL.scale(0.7, 0.13, 1);
+  finL.scale(0.7, 0.10, 1);
   finL.rotateY(-Math.PI * 0.22);
-  finL.translate(0.1, -0.1, 0.18);
+  finL.translate(0.1, -0.12, 0.20);
 
-  const finR = new THREE.ConeGeometry(0.14, 0.28, 3);
+  const finR = new THREE.ConeGeometry(0.16, 0.32, 3);
   finR.rotateX(-Math.PI / 2);
-  finR.scale(0.7, 0.13, 1);
+  finR.scale(0.7, 0.10, 1);
   finR.rotateY(Math.PI * 0.22);
-  finR.translate(0.1, -0.1, -0.18);
+  finR.translate(0.1, -0.12, -0.20);
 
   return { body, tail, dorsal, anal, finL, finR };
 }
@@ -93,8 +110,18 @@ allOk &= check("Dorsal is a vertical fin (Y span > Z span)",
 // Anal: below body (Y < 0)
 allOk &= check("Anal fully below midline (Y < 0)",
   stats.anal.b.max.y <= 0);
-allOk &= check("Anal tip below body bottom",
-  stats.anal.b.min.y < stats.body.b.min.y);
+// Body tapers heavily toward the tail, so check against the LOCAL body
+// width at the anal-fin location (x ~= -0.42) rather than the global min.y
+// which is taken at the widest point of the body.
+{
+  const ax = (stats.anal.b.min.x + stats.anal.b.max.x) / 2;
+  const t = ax - 0.15;          // matches body taper centred at peakX=0.15
+  const sigma = 0.45;            // sigmaBack
+  const localW = 0.12 + 0.88 * Math.exp(-(t * t) / (sigma * sigma));
+  const localBodyMinY = stats.body.b.min.y * localW;
+  allOk &= check("Anal tip below body bottom AT THE ANAL X",
+    stats.anal.b.min.y < localBodyMinY);
+}
 
 // Pectoral L: center in +Z half
 allOk &= check("FinL center in +Z half (left side)",
