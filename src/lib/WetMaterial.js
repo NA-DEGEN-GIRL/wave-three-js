@@ -14,6 +14,7 @@ import * as THREE from "three/webgpu";
 import {
   Fn, vec2, vec3, vec4, float, uniform, texture, mix, clamp, pow,
   smoothstep, max, min, dot, normalize, positionWorld, normalLocal,
+  vertexColor,
 } from "three/tsl";
 
 /**
@@ -54,6 +55,11 @@ export function applyWetness(root, waterSystem, opts = {}) {
     newMat.flatShading = oldMat.flatShading;
     newMat.transparent = oldMat.transparent;
     newMat.opacity = oldMat.opacity;
+    // Preserve the vertex-colors flag from the source material so the
+    // per-vertex baked rock/sand palette survives the wrap (without this,
+    // applyWetness silently flattens those rocks to the scalar oldMat.color
+    // -- which defaults to white -- giving the dull gray flat look).
+    newMat.vertexColors = !!oldMat.vertexColors;
     newMat.userData.original = oldMat;
 
     const baseColor = uniform(newMat.color);
@@ -81,8 +87,13 @@ export function applyWetness(root, waterSystem, opts = {}) {
       return clamp(max(heightWet, foamHere), 0.0, 1.0);
     })();
 
-    // Apply Lagarde wetness formula via TSL.
-    const wetAlbedo = pow(baseColor, float(1.0).add(porosityU.mul(wetnessNode)));
+    // Apply Lagarde wetness formula via TSL. When the source material has
+    // vertexColors enabled (rocks, sand), multiply by the per-vertex colour
+    // so the baked palette shows through the wet-darken response.
+    const baseAlbedo = oldMat.vertexColors
+      ? vec3(baseColor).mul(vertexColor())
+      : vec3(baseColor);
+    const wetAlbedo = pow(baseAlbedo, float(1.0).add(porosityU.mul(wetnessNode)));
     newMat.colorNode = wetAlbedo;
     newMat.roughnessNode = mix(baseRoughness, float(0.10), wetnessNode);
 
