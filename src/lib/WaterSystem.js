@@ -235,7 +235,7 @@ export class WaterSystem {
       foamSurfaceColor: uniform(new THREE.Color("#ffffff")),
       foamSurfaceCoverage: uniform(0.3),
       foamSurfaceOpacity:  uniform(0.35),
-      foamSurfaceSize:     uniform(80.0),
+      foamSurfaceSize:     uniform(35.0),
       foamWavesColor:      uniform(new THREE.Color("#ffffff")),
       foamWavesCoverage:   uniform(0.55),
       foamWavesOpacity:    uniform(0.85),
@@ -245,7 +245,7 @@ export class WaterSystem {
       foamShoreColor:      uniform(new THREE.Color("#ffffff")),
       foamShoreCoverage:   uniform(0.5),
       foamShoreOpacity:    uniform(0.5),
-      foamShoreRange:      uniform(40.0),
+      foamShoreRange:      uniform(18.0),
       foamShoreSize:       uniform(50.0),
       // Contact foam (around objects touching water) — exposed as own group.
       foamContactColor:    uniform(new THREE.Color("#ffffff")),
@@ -279,10 +279,10 @@ export class WaterSystem {
     };
 
     this.foam = {
-      surface:   { enabled: true, color: new THREE.Color("#ffffff"), coverage: 0.3,  opacity: 0.35, size: 80, foamTexture: null },
+      surface:   { enabled: true, color: new THREE.Color("#ffffff"), coverage: 0.3,  opacity: 0.35, size: 35, foamTexture: null },
       waves:     { enabled: true, color: new THREE.Color("#ffffff"), coverage: 0.55, crestCoverage: 0.5, peakIntensity: 0.85,
                    opacity: 0.75, rippleWeight: 1.0, waveWeight: 1.0, windBias: 0.8, windStretch: 0.5, size: 22, foamTexture: null },
-      shoreline: { enabled: true, color: new THREE.Color("#ffffff"), coverage: 0.5,  opacity: 0.5,  range: 40, size: 50, foamTexture: null },
+      shoreline: { enabled: true, color: new THREE.Color("#ffffff"), coverage: 0.65, opacity: 0.6,  range: 18, size: 30, foamTexture: null },
       // New: object-contact foam (depth-driven band where water meets opaque objects).
       contact:   { enabled: true, color: new THREE.Color("#ffffff"), coverage: 0.45, opacity: 0.35, distance: 0.9 },
     };
@@ -965,26 +965,57 @@ export class WaterSystem {
                           .mul(u.foamWavesOpacity)
                           .mul(u.foamWavesEnabled);
 
-      // (2) Surface foam: residual lace streaks across the open water.
-      // Coverage now means literally "fraction of pixels showing foam":
-      //   coverage 0   → no foam
-      //   coverage 0.5 → roughly half the eligible area
-      //   coverage 1   → everywhere the noise has a ridge
-      // Previously the threshold was tied to a fixed turbulence value so tiny
-      // coverage values still painted the whole surface white.
-      const surfTex = turbulence(foamUV.mul(0.5).add(vec2(driftFoam.mul(0.1), driftFoam.mul(0.05))));
-      // surfTex range is roughly [0, 0.42] for turbulence(2D, 5 octaves).
-      // Move the threshold inversely with coverage so coverage=0 keeps threshold
-      // at the top end (no pixel passes) and coverage=1 brings it to 0 (everything).
-      const surfThreshold = mix(float(0.42), float(-0.02), clamp(u.foamSurfaceCoverage, 0.0, 1.0));
-      const surfFoam = smoothstep(surfThreshold.add(0.05), surfThreshold, surfTex)
+      // (2) Surface foam: a multi-octave drifting scatter pattern. Reads as
+      // "fine bubbles near the camera, medium drifting clusters mid-range,
+      // large faint patches at distance" — replaces the old single-octave
+      // chunky blob threshold. Uses foamSurfaceSize as the BASE coordinate
+      // scale (smaller = denser foam, ~25-40 m is natural; default 35).
+      const surfSizeInv = float(1.0).div(max(u.foamSurfaceSize, float(2.0)));
+      const surfBaseUV  = vec2(uAlongWind.mul(surfSizeInv), vCrossWind.mul(surfSizeInv));
+      const surfDrift   = driftFoam.mul(0.06);
+      const surfBig  = turbulence(surfBaseUV.add(vec2(surfDrift.mul(0.6), surfDrift.mul(0.3))));
+      const surfMed  = turbulence(surfBaseUV.mul(3.5)
+                          .add(vec2(surfDrift, surfDrift.mul(0.4))).add(vec2(3.2, 7.1)));
+      const surfFine = turbulence(surfBaseUV.mul(11.0)
+                          .add(vec2(surfDrift.mul(1.7), surfDrift.mul(0.85))).add(vec2(9.4, 2.5)));
+      // Coverage ramps the thresholds of all three layers — at low coverage
+      // only the fine specks show, mid adds medium clusters, high adds the
+      // large drift sheet.
+      const surfCov  = clamp(u.foamSurfaceCoverage, 0.0, 1.0);
+      const tBig  = mix(float(0.36), float(0.18), surfCov);
+      const tMed  = mix(float(0.34), float(0.16), surfCov);
+      const tFine = mix(float(0.30), float(0.14), surfCov);
+      const layerBig  = smoothstep(tBig.add(0.06),  tBig,  surfBig).mul(0.45);
+      const layerMed  = smoothstep(tMed.add(0.05),  tMed,  surfMed).mul(0.60);
+      const layerFine = smoothstep(tFine.add(0.04), tFine, surfFine).mul(0.75);
+      // max-combine — the brightest layer wins per pixel, avoiding pure white
+      // over-saturation while letting fine detail break through medium patches.
+      const surfFoam = clamp(max(layerBig, max(layerMed, layerFine)), 0.0, 1.0)
                           .mul(u.foamSurfaceOpacity).mul(u.foamSurfaceEnabled);
 
-      // (3) Shore foam: thin animated band where curvature spikes (Jacobian whitecap).
-      const shoreTex = turbulence(foamUV.mul(1.5).add(vec2(2.7, 9.3)));
-      const shoreLace = clamp(float(0.40).sub(shoreTex).mul(6.0), 0.0, 1.0);
-      const shoreMask = clamp(pow(curvatureFoam, float(1.5)).mul(2.0).mul(u.foamShoreCoverage), 0.0, 1.0);
-      const shoreFoam = shoreMask.mul(shoreLace).mul(u.foamShoreOpacity).mul(u.foamShoreEnabled);
+      // (3) Shore foam: TRUE depth-driven foam that appears where the water
+      // meets shallow geometry (sand beach, rock outcrop, ocean floor near
+      // surface). Reads sceneDistRaw from the refraction depth pass — small
+      // value = water column is thin = shore. `range` is metres of water
+      // column where foam fades to zero. (1 - noOccluder) suppresses it in
+      // open ocean where there is no scene behind the water at all.
+      const shoreRangeSafe = max(u.foamShoreRange, float(0.5));
+      // Dense band right at the contact (inner 25% of the range), full opacity.
+      const shoreNear = smoothstep(shoreRangeSafe.mul(0.25), float(0.0), sceneDistRaw);
+      // Wider lace-modulated halo reaching out to the full range.
+      const shoreUV    = vec2(uAlongWind.div(max(u.foamShoreSize, float(1.0))),
+                              vCrossWind.div(max(u.foamShoreSize, float(1.0))));
+      const shorePulse = turbulence(shoreUV.add(vec2(driftFoam.mul(0.15), float(1.7))));
+      const shoreEdgeLace = smoothstep(float(0.36), float(0.16), shorePulse);
+      const shoreFar      = smoothstep(shoreRangeSafe, float(0.0), sceneDistRaw)
+                              .mul(shoreEdgeLace);
+      // Skip open ocean (no occluder behind water).
+      const shoreGate = float(1.0).sub(noOccluder);
+      const shoreFoam = clamp(max(shoreNear.mul(0.85), shoreFar), 0.0, 1.0)
+                          .mul(shoreGate)
+                          .mul(u.foamShoreCoverage)
+                          .mul(u.foamShoreOpacity)
+                          .mul(u.foamShoreEnabled);
 
       // Sun-asymmetry factor: dims foam on the lee (shadow) side of objects.
       // The user noticed identical foam on both sides of every rock — this
