@@ -28,6 +28,7 @@ import { OceanFloor } from "./OceanFloor.js";
 import { WaterReflector } from "./Reflector.js";
 import { RefractionPass } from "./RefractionPass.js";
 import { FoamSimulation } from "./FoamSimulation.js";
+import { InteractiveWater } from "./InteractiveWater.js";
 import { OceanFFT } from "./OceanFFT.js";
 
 const DEFAULT_GRID = { levels: 6, segments: 96, baseSize: 200 };
@@ -318,6 +319,18 @@ export class WaterSystem {
     // is what makes foam STREAKS LINGER — the commercial-grade core mechanic.
     this.foamSim = new FoamSimulation({ resolution: 1024, worldSize: 200, decayRate: 0.7 });
 
+    // Interactive heightfield — wave-equation layer for object-driven displacement
+    // (bow waves, impact ripples). Sits on top of the analytical Gerstner/FFT
+    // layers. Buoyancy still reads the analytical layer only (one-way coupling)
+    // so boats don't resonate with their own wake. See InteractiveWater.js for
+    // design notes (256² RT, c=3 m/s, damping=0.003, absorbing boundary).
+    this.interactive = new InteractiveWater({
+      resolution: 256,
+      worldSize: 200,
+      waveSpeed: 3.0,
+      damping: 0.003,
+    });
+
     // Tessendorf FFT cascade — opt-in. The CPU IFFT can add vertex displacement
     // on top of Gerstner that compounds into fast-moving crests if not tuned
     // for the scene, so we default to OFF. Enable explicitly via
@@ -409,6 +422,8 @@ export class WaterSystem {
 
   _attachFoamSim() {
     if (!this.foamSim) return;
+    // Pass interactive RT so foam can inject extra birth where wake gradient is high.
+    this.foamSim.attachInteractive?.(this.interactive);
     this.foamSim.attach({
       waves: this.gerstner.waves,
       windDir: this.waves.windDirection,
@@ -640,9 +655,25 @@ export class WaterSystem {
         fftDz = fftSample.b.mul(this._fftStrength);
       }
 
+      // Interactive heightfield contribution (object-driven displacement).
+      // Sample the InteractiveWater RT at world XZ; mask cells outside the RT
+      // domain so distant verts don't pick up garbage edge-clamped values.
+      let interactiveDy = float(0);
+      if (this.interactive) {
+        const iHalf = this.interactive.halfSizeUniform;
+        const iCtr  = this.interactive.centerXZUniform;
+        const iUV = vec2(
+          float(wx).sub(iCtr.x).div(iHalf).mul(0.5).add(0.5),
+          float(wz).sub(iCtr.y).div(iHalf).mul(0.5).add(0.5),
+        );
+        const iInBounds = step(0.0, iUV.x).mul(step(iUV.x, 1.0))
+                          .mul(step(0.0, iUV.y)).mul(step(iUV.y, 1.0));
+        interactiveDy = texture(this.interactive.currentTexture, iUV).r.mul(iInBounds);
+      }
+
       return vec3(
         positionLocal.x.add(w.x).add(fftDx),
-        positionLocal.y.add(w.y).add(extraYMid).add(extraYMicro).add(fftDy),
+        positionLocal.y.add(w.y).add(extraYMid).add(extraYMicro).add(fftDy).add(interactiveDy),
         positionLocal.z.add(w.z).add(fftDz),
       );
     })();
@@ -1148,6 +1179,43 @@ export class WaterSystem {
     }
     // (Refraction pass moved into the conditional block above so it hides ALL
     // ring meshes, not just the inner one.)
+    // Interactive heightfield step — must run BEFORE foam so the foam material
+    // sees the newest interactive RT for gradient-driven wake injection.
+    if (this.interactive && this.interactive.enabled) {
+      const splats = [];
+      for (const obj of this.buoyancy._objects.values()) {
+        const m = obj.mesh;
+        if (!m.userData._lastPosForSplat) {
+          m.userData._lastPosForSplat = m.position.clone();
+        }
+        const dt = Math.max(0.001, deltaTime);
+        const vx = (m.position.x - m.userData._lastPosForSplat.x) / dt;
+        const vz = (m.position.z - m.userData._lastPosForSplat.z) / dt;
+        m.userData._lastPosForSplat.copy(m.position);
+        const speed = Math.sqrt(vx * vx + vz * vz);
+        if (speed < 0.2) continue;     // expert: skip stationary objects
+        // Hull beam from buoyancy sampleWidth (BBox-derived). Sigma = beam/2.
+        const beam = Math.max(1, obj.sampleWidth || 2);
+        const sigmaHull = beam * 0.5;
+        // Per consult: A = -0.04 · clamp(|v|, 0, 5).
+        const ampHull = -0.04 * Math.min(speed, 5);
+        splats.push({ x: m.position.x, z: m.position.z, amp: ampHull, sigma: sigmaHull });
+        // Bow lobe — small positive Gaussian 1m ahead in velocity direction.
+        if (speed > 0.5) {
+          const inv = 1 / speed;
+          const fx = vx * inv, fz = vz * inv;
+          splats.push({
+            x: m.position.x + fx * 1.0,
+            z: m.position.z + fz * 1.0,
+            amp: -ampHull * 0.3,                 // positive (= -negative)
+            sigma: Math.max(0.4, sigmaHull * 0.6),
+          });
+        }
+      }
+      this.interactive.setSplats(splats);
+      this.interactive.update(this.renderer, this.camera, deltaTime);
+    }
+
     // Foam simulation step — runs one ping-pong pass to evolve persistent foam.
     if (this.foamSim) {
       // Build wake sources from buoyancy-tracked objects with userData.wakeStrength.

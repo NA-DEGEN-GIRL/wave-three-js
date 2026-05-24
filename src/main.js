@@ -626,6 +626,35 @@ async function main() {
       .onChange((v) => (sky.sunUniforms.intensity.value = v));
   }
 
+  // ---------- Interactive Water (object-driven displacement) ----------
+  // The InteractiveWater layer lets boats / splash events push displacement
+  // into the water. Toggle off to compare against the analytical Gerstner-only
+  // surface. Range / damping knobs are per-step (60Hz).
+  if (water.interactive) {
+    const iwFolder = gui.addFolder("Interactive Water");
+    const iwState = {
+      enabled: water.interactive.enabled,
+      waveSpeed: water.interactive.waveSpeed,
+      damping: water.interactive.damping,
+    };
+    desc(iwFolder.add(iwState, "enabled"),
+      "Master toggle. OFF = boats / splash do not displace water (Gerstner-only).")
+      .onChange((v) => water.interactive.setEnabled(v));
+    desc(iwFolder.add(iwState, "waveSpeed", 0.5, 8, 0.1),
+      "Ripple propagation speed (m/s). 3 m/s = natural short-ocean ripples. >8 risks CFL instability.")
+      .onChange((v) => water.interactive.setWaveSpeed(v));
+    desc(iwFolder.add(iwState, "damping", 0, 0.02, 0.0005),
+      "Energy bleed per step. Higher = ripples die quicker. 0.003 = natural.")
+      .onChange((v) => water.interactive.setDamping(v));
+    iwFolder.add({ pulse: () => {
+      // Fire 6 impulses around the origin so you can see the effect immediately.
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        water.interactive.splatImpulse(Math.cos(a) * 5, Math.sin(a) * 5, 0.35, 0.6);
+      }
+    }}, "pulse").name("💥 Test pulse ring");
+  }
+
   const qualityFolder = gui.addFolder("Quality");
   const qState = { level: "high" };
   qualityFolder.add(qState, "level", ["low", "medium", "high", "ultra"]).onChange(async (v) => { await water.setQualityLevel(v); });
@@ -782,13 +811,30 @@ async function main() {
     await water.update(dt);
 
     // Spawn spray particles from buoyancy objects that have wakeStrength.
+    // Same loop also fires periodic interactive-water IMPULSES when boats are
+    // moving fast enough — gives a one-shot concentric ripple at every "impact".
     const emitters = [];
     for (const o of water.buoyancy._objects.values()) {
       const m = o.mesh;
       const ws = (m.userData && m.userData.wakeStrength) ?? 0;
       if (ws <= 0) continue;
-      // Approximate "splash energy" from how much the buoyancy moved the boat this frame.
       emitters.push({ x: m.position.x, y: 0.4, z: m.position.z, strength: ws * 0.4 });
+
+      // Periodic impulse — every ~0.25s when the boat is moving > 1 m/s, splat
+      // a small positive Gaussian to seed transient ripples around the hull.
+      if (!m.userData._lastSplashImpulse) m.userData._lastSplashImpulse = 0;
+      m.userData._lastSplashImpulse += dt;
+      const last = m.userData._lastPosForSplat;
+      if (last && water.interactive?.enabled && m.userData._lastSplashImpulse > 0.25) {
+        const vx = m.position.x - last.x, vz = m.position.z - last.z;
+        const speed = Math.sqrt(vx * vx + vz * vz) / Math.max(0.001, dt);
+        if (speed > 1.0) {
+          // amp scales with KE, capped. sigma scales with hull beam.
+          const amp = 0.08 + Math.min(0.22, speed * 0.03) * ws;
+          water.interactive.splatImpulse(m.position.x, m.position.z, amp, 0.55);
+          m.userData._lastSplashImpulse = 0;
+        }
+      }
     }
     spray.update(dt, emitters);
 

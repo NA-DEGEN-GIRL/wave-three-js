@@ -15,7 +15,7 @@
 import * as THREE from "three/webgpu";
 import {
   Fn, vec2, vec3, vec4, float, uniform, texture, uv, fract, floor, sin, cos,
-  dot, mix, clamp, max, min, abs, pow, exp, length, uniformArray,
+  dot, mix, clamp, max, min, abs, pow, exp, length, uniformArray, smoothstep, step,
 } from "three/tsl";
 
 const MAX_WAKE_SOURCES = 16;
@@ -129,6 +129,18 @@ export class FoamSimulation {
     this._attached = true;
   }
 
+  /**
+   * Optional: hand over a reference to an InteractiveWater instance. When set,
+   * the foam simulation reads its current height RT and adds gradient-driven
+   * BIRTH wherever the slope is steep — i.e. behind boats and around splash
+   * impacts. This is the "auto wake foam" feature.
+   */
+  attachInteractive(interactive) {
+    this._interactive = interactive || null;
+    // If material was already built, rebuild it to wire in the new sampler.
+    if (this._attached) this._buildSimulationMaterial();
+  }
+
   _buildSimulationMaterial() {
     if (this._simQuad) {
       this._simScene.remove(this._simQuad);
@@ -226,7 +238,35 @@ export class FoamSimulation {
         wakeBirth.addAssign(falloff.mul(src.z).mul(u.wakeStrength));
       }
 
-      const birth = breakBirth.add(wakeBirth).mul(u.dt);
+      // Interactive heightfield gradient → auto wake foam.
+      // Sample h at 4 neighbours, compute |∇h|, threshold via smoothstep.
+      // Per consult: foam_birth += 2.0 · smoothstep(0.15, 0.4, |∇h|).
+      const interactiveBirth = float(0).toVar();
+      if (this._interactive) {
+        const iHalf = this._interactive.halfSizeUniform;
+        const iCtr  = this._interactive.centerXZUniform;
+        const iUV = vec2(
+          worldXZ.x.sub(iCtr.x).div(iHalf).mul(0.5).add(0.5),
+          worldXZ.y.sub(iCtr.y).div(iHalf).mul(0.5).add(0.5),
+        );
+        // Stay inside the RT footprint — outside contributes nothing.
+        const inB = step(0.0, iUV.x).mul(step(iUV.x, 1.0))
+                    .mul(step(0.0, iUV.y)).mul(step(iUV.y, 1.0));
+        const iRes = this._interactive.resolution;
+        const iTexel = float(1.0 / iRes);
+        const hL = texture(this._interactive.currentTexture, iUV.sub(vec2(iTexel, 0))).r;
+        const hR = texture(this._interactive.currentTexture, iUV.add(vec2(iTexel, 0))).r;
+        const hD = texture(this._interactive.currentTexture, iUV.sub(vec2(0, iTexel))).r;
+        const hU = texture(this._interactive.currentTexture, iUV.add(vec2(0, iTexel))).r;
+        // Slope in metres/cell — divide by cellSize to get dimensionless slope.
+        const cell = float(this._interactive.cellSize);
+        const gradX = hR.sub(hL).mul(0.5).div(cell);
+        const gradZ = hU.sub(hD).mul(0.5).div(cell);
+        const slope = length(vec2(gradX, gradZ)).mul(inB);
+        interactiveBirth.assign(smoothstep(float(0.15), float(0.4), slope).mul(2.0));
+      }
+
+      const birth = breakBirth.add(wakeBirth).add(interactiveBirth).mul(u.dt);
 
       // Accumulate, clamp.
       const foam = clamp(decayed.add(birth), 0.0, 1.0);
