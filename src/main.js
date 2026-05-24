@@ -210,8 +210,13 @@ function getSandMaterial() {
 function makeSandMound(radius, opts = {}) {
   const rings = opts.rings ?? 10;
   const segs  = opts.segments ?? 32;
-  const centerH = opts.centerHeight ?? Math.max(0.8, radius * 0.18);
-  const edgeH   = opts.edgeHeight   ?? -0.4;
+  // centerH scales with island radius so big islands feel commanding;
+  // floor at 1.8 m keeps tiny islands proudly above the water.
+  const centerH = opts.centerHeight ?? Math.max(1.8, radius * 0.28);
+  // edgeH barely above the waterline so the dry tan dominates and only
+  // the very rim picks up the wet-sand stripe. Was -0.4 -> the whole
+  // mound sat in the wet band and read as muddy brown.
+  const edgeH   = opts.edgeHeight   ?? 0.05;
   const bumpStrength = opts.bumpStrength ?? 0.45;
   const seed = opts.seed ?? Math.random() * 100;
 
@@ -264,35 +269,55 @@ function makeSandMound(radius, opts = {}) {
 function makeIsland({ radius = 12, palms = 4, rocks = 6, seed = Math.random() * 100 } = {}) {
   const g = new THREE.Group();
 
-  const sandGeom = makeSandMound(radius, { seed, centerHeight: 1.0 + Math.random() * 0.6 });
+  // Tall mound so dry tan dominates the silhouette; edge barely above water
+  // so only the rim picks up the wet stripe.
+  const centerHeight = Math.max(2.5, radius * 0.30);
+  const edgeHeight   = 0.10;
+
+  const sandGeom = makeSandMound(radius, { seed, centerHeight, edgeHeight });
   paintSandColors(sandGeom);
   const sand = new THREE.Mesh(sandGeom, getSandMaterial());
   g.add(sand);
+
+  // Mirror of the makeSandMound profile so we can place props ON the sand.
+  const sandY = (distRatio) => {
+    const tr = Math.max(0, Math.min(1, distRatio));
+    const profile = Math.pow(1 - tr, 1.4);
+    return edgeHeight + (centerHeight - edgeHeight) * profile;
+  };
 
   for (let i = 0; i < palms; i++) {
     const t = makePalmTree(1 + Math.random() * 0.4);
     const ang = (i / palms) * Math.PI * 2 + Math.random() * 0.4;
     const r = radius * 0.35 * Math.random();
-    t.position.set(Math.cos(ang) * r, 0.5, Math.sin(ang) * r);
+    // Sink trunk base ~0.3 m into the sand so it does not float in mid-air.
+    t.position.set(Math.cos(ang) * r, sandY(r / radius) - 0.3, Math.sin(ang) * r);
     t.rotation.y = Math.random() * Math.PI * 2;
     g.add(t);
   }
   for (let i = 0; i < rocks; i++) {
     const r = makeRock(i * 13 + Math.floor(Math.random() * 50));
     const ang = (i / rocks) * Math.PI * 2 + Math.random();
-    const dist = radius * (0.6 + Math.random() * 0.4);
-    r.position.set(Math.cos(ang) * dist, -0.3 + Math.random() * 1, Math.sin(ang) * dist);
+    const distRatio = 0.55 + Math.random() * 0.45;
+    const dist = radius * distRatio;
+    r.position.set(
+      Math.cos(ang) * dist,
+      sandY(distRatio) - 0.4 + Math.random() * 1.0,
+      Math.sin(ang) * dist,
+    );
     r.scale.setScalar(0.6 + Math.random() * 1.2);
     g.add(r);
   }
-  // Pebble band — many small rocks scattered around the waterline. Cheap
-  // because they share the procedural rock material (1 compile, N instances
-  // via different Mesh objects but same Material).
+  // Pebble band -- right at the waterline rim.
   for (let i = 0; i < 22; i++) {
     const ang = Math.random() * Math.PI * 2;
     const dist = radius * (0.88 + Math.random() * 0.28);
     const p = makeRock(i * 7 + Math.floor(Math.random() * 100));
-    p.position.set(Math.cos(ang) * dist, -0.4 + Math.random() * 0.25, Math.sin(ang) * dist);
+    p.position.set(
+      Math.cos(ang) * dist,
+      -0.05 + Math.random() * 0.35,
+      Math.sin(ang) * dist,
+    );
     p.scale.setScalar(0.12 + Math.random() * 0.22);
     g.add(p);
   }
@@ -913,7 +938,9 @@ async function main() {
   // Apply wetness to all scene props that touch the water. The wetness shader
   // samples the persistent foam RT + height-above-waterline so rocks/palms/boats
   // get darker + glossier near the waterline and where waves splash on them.
-  applyWetness(props, water, { porosity: 0.7, fadeRange: 4.5, foamCoupling: 1.2 });
+  // fadeRange 1.2 m: only props at the immediate waterline darken. Was 4.5 m
+  // which painted rocks dark even when they sat several meters above water.
+  applyWetness(props, water, { porosity: 0.6, fadeRange: 1.2, foamCoupling: 0.8 });
 
   try { await renderer.compileAsync(scene, camera); } catch (e) { console.warn("compileAsync failed:", e); }
 
