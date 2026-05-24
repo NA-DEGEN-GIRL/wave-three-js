@@ -982,15 +982,22 @@ export class WaterSystem {
       // only the fine specks show, mid adds medium clusters, high adds the
       // large drift sheet.
       const surfCov  = clamp(u.foamSurfaceCoverage, 0.0, 1.0);
-      const tBig  = mix(float(0.36), float(0.18), surfCov);
-      const tMed  = mix(float(0.34), float(0.16), surfCov);
-      const tFine = mix(float(0.30), float(0.14), surfCov);
-      const layerBig  = smoothstep(tBig.add(0.06),  tBig,  surfBig).mul(0.45);
-      const layerMed  = smoothstep(tMed.add(0.05),  tMed,  surfMed).mul(0.60);
-      const layerFine = smoothstep(tFine.add(0.04), tFine, surfFine).mul(0.75);
-      // max-combine — the brightest layer wins per pixel, avoiding pure white
-      // over-saturation while letting fine detail break through medium patches.
-      const surfFoam = clamp(max(layerBig, max(layerMed, layerFine)), 0.0, 1.0)
+      // Higher floors at coverage=1: each octave still needs the noise to
+      // spike to a proper ridge (~0.24-0.28) before painting foam. Without
+      // this, coverage=1 dropped the thresholds so low that ~85% of pixels
+      // qualified and the whole surface read as a milky blanket.
+      const tBig  = mix(float(0.38), float(0.28), surfCov);
+      const tMed  = mix(float(0.36), float(0.26), surfCov);
+      const tFine = mix(float(0.32), float(0.24), surfCov);
+      // Per-layer opacity also reduced (was 0.45/0.60/0.75) so overlapping
+      // octaves never saturate to pure white.
+      const layerBig  = smoothstep(tBig.add(0.06),  tBig,  surfBig).mul(0.30);
+      const layerMed  = smoothstep(tMed.add(0.05),  tMed,  surfMed).mul(0.40);
+      const layerFine = smoothstep(tFine.add(0.04), tFine, surfFine).mul(0.55);
+      // max-combine + envelope cap (0..0.7 instead of 0..1) so even with the
+      // user-controlled opacity slider cranked up, the foam coverage stays
+      // partial — there is always visible water between the foam patches.
+      const surfFoam = clamp(max(layerBig, max(layerMed, layerFine)), 0.0, 0.7)
                           .mul(u.foamSurfaceOpacity).mul(u.foamSurfaceEnabled);
 
       // (3) Shore foam: TRUE depth-driven foam that appears where the water
