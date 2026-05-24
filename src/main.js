@@ -524,14 +524,21 @@ async function main() {
   const island2 = makeIsland({ radius: 12, palms: 3, rocks: 6 });
   island2.position.set(85, 0, -75);
   props.add(island2);
-  // A distant land mass silhouette
-  const distantLand = new THREE.Mesh(
-    new THREE.SphereGeometry(80, 18, 8, 0, Math.PI * 2, 0, Math.PI / 2),
-    new THREE.MeshStandardMaterial({ color: 0x4a5a6a, roughness: 1.0 }),
-  );
-  distantLand.scale.set(2, 0.18, 1.4);
-  distantLand.position.set(-150, -2, -200);
-  props.add(distantLand);
+  // A larger distant island silhouette -- previously a flat-shaded sphere
+  // segment scaled to a 160m disc that read as a UFO. Replaced with the new
+  // makeIsland which uses the procedural sand-mound geometry + warm vertex-
+  // colored rocks + palm clusters, so the distant landmass actually reads as
+  // an island when viewed from anywhere on the camera path.
+  const distantIsland = makeIsland({
+    radius: 55,
+    palms: 14,
+    rocks: 18,
+    seed: 7.3,
+  });
+  distantIsland.position.set(-150, 0, -200);
+  // Slightly elongated to suggest a longer shoreline at this distance.
+  distantIsland.scale.set(1.4, 1.0, 1.0);
+  props.add(distantIsland);
 
   // Buoys
   for (let i = 0; i < 3; i++) {
