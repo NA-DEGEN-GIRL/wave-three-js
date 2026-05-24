@@ -27,41 +27,56 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
  */
 function makeFishGeometry() {
   // Body: stretched icosahedron — gives a smooth fish-shaped silhouette.
+  // Convention: nose at +X, top at +Y, sides at ±Z.
   const body = new THREE.IcosahedronGeometry(0.35, 1);
   body.scale(2.0, 0.75, 0.5);
 
-  // Tail fin: a cone flattened into the XY plane, rear-tip facing −X.
-  // Halved on the Z axis so it reads as a forked tail when seen edge-on.
-  const tail = new THREE.ConeGeometry(0.35, 0.55, 4);
-  tail.rotateZ(Math.PI / 2);   // tip from +Y → +X
-  tail.scale(1, 1, 0.18);      // flatten into a fin
-  tail.translate(-0.85, 0, 0); // glue to rear of body
-  tail.rotateY(Math.PI);       // tip now points −X (away from body)
+  // Tail fin: a vertical triangle sitting in the XY plane, hanging off
+  // the body rear and extending further back into -X. Cone tip points
+  // at -X after rotateZ(+pi/2) (which takes +Y -> -X), so just flatten
+  // the Z dimension and translate to the rear. The previous version had
+  // an extra rotateY(pi) that flipped the whole piece to the FRONT of
+  // the fish — that\'s what made the fish look like squids.
+  const tail = new THREE.ConeGeometry(0.4, 0.6, 4);
+  tail.rotateZ(Math.PI / 2);  // tip from +Y -> -X (rearward)
+  tail.scale(1, 1, 0.14);     // flatten into a vertical fin
+  tail.translate(-0.7, 0, 0); // base sits at body rear, tip at x ~= -1.0
 
-  // Dorsal fin: small triangle on top.
-  const dorsal = new THREE.ConeGeometry(0.16, 0.22, 3);
-  dorsal.rotateX(Math.PI / 2);   // tip from +Y → +Z
-  dorsal.scale(0.4, 1, 0.5);
-  dorsal.translate(-0.1, 0.28, 0);
+  // Dorsal fin: vertical triangle on top of the body. Default Cone tip
+  // is already at +Y (up), so do NOT rotate around X — just flatten the
+  // Z dimension so it reads as a thin triangle pointing up.
+  const dorsal = new THREE.ConeGeometry(0.18, 0.35, 3);
+  dorsal.scale(0.55, 1, 0.13);
+  dorsal.translate(-0.15, 0.27, 0);
 
-  // Side pectoral fins — one each side, mid-body.
-  const finBase = new THREE.ConeGeometry(0.12, 0.18, 3);
-  finBase.rotateZ(Math.PI / 2);
-  finBase.scale(1, 0.35, 0.5);
-  const finL = finBase.clone();
-  finL.translate(0.15, -0.05,  0.18);
-  finL.rotateY(-0.25);
-  const finR = finBase.clone();
-  finR.translate(0.15, -0.05, -0.18);
-  finR.rotateY( 0.25);
+  // A small anal fin under the rear belly (bottom mirror of dorsal).
+  const anal = new THREE.ConeGeometry(0.12, 0.2, 3);
+  anal.rotateZ(Math.PI);  // tip now points DOWN (-Y)
+  anal.scale(0.5, 1, 0.12);
+  anal.translate(-0.4, -0.26, 0);
+
+  // Pectoral fins — flat paddles extending from the sides, swept BACK.
+  // Convention: +pi*0.18 around Y takes +Z -> +X (forward sweep); to
+  // sweep BACK we use the negative sign on the left (+Z) fin and positive
+  // sign on the right (-Z) fin.
+  const finL = new THREE.ConeGeometry(0.14, 0.28, 3);
+  finL.rotateX(Math.PI / 2);     // tip from +Y -> +Z (sideways, left)
+  finL.scale(0.7, 0.13, 1);      // flatten in Y so it\'s a thin paddle
+  finL.rotateY(-Math.PI * 0.22); // sweep tip toward -X (back)
+  finL.translate(0.1, -0.1, 0.18);
+
+  const finR = new THREE.ConeGeometry(0.14, 0.28, 3);
+  finR.rotateX(-Math.PI / 2);    // tip from +Y -> -Z (sideways, right)
+  finR.scale(0.7, 0.13, 1);
+  finR.rotateY(Math.PI * 0.22);  // mirror sweep
+  finR.translate(0.1, -0.1, -0.18);
 
   // mergeGeometries() refuses a mix of indexed + non-indexed inputs.
-  // IcosahedronGeometry is non-indexed but ConeGeometry is indexed, so
-  // coerce them all to non-indexed before merging.
   const merged = mergeGeometries([
     body.toNonIndexed(),
     tail.toNonIndexed(),
     dorsal.toNonIndexed(),
+    anal.toNonIndexed(),
     finL.toNonIndexed(),
     finR.toNonIndexed(),
   ]);

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Fish silhouette test</title>
+  <style>
+    body { margin: 0; background: #2a3540; color: #fff; font-family: sans-serif; }
+    #info { position: fixed; left: 10px; top: 10px; font-size: 12px; line-height: 1.5;
+            background: rgba(0,0,0,0.6); padding: 8px; border-radius: 6px; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <div id="info">
+    <b>Fish geometry inspection</b><br>
+    Big fish facing +X (right). Red=X, Green=Y, Blue=Z.<br>
+    Use ?view=side / front / top / iso / back / under
+  </div>
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import { FishSchool } from "./src/lib/FishSchool.js";
+
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setSize(1024, 768);
+    renderer.setPixelRatio(1);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x2a3540);
+
+    // Light + ambient.
+    const sun = new THREE.DirectionalLight(0xffffff, 2.0);
+    sun.position.set(3, 5, 2);
+    scene.add(sun);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+    // Axes for reference.
+    scene.add(new THREE.AxesHelper(2.5));
+    // Ground grid for spatial reference.
+    const grid = new THREE.GridHelper(10, 10, 0x666666, 0x444444);
+    grid.position.y = -2;
+    scene.add(grid);
+
+    // One static fish, size 3, facing +X.
+    const fish = new FishSchool({
+      count: 1, nSchools: 1,
+      bounds: { radius: 50, depthMin: 0, depthMax: 0 },
+      sizeRange: [3.0, 3.0],
+    });
+    // Force the fish to origin, facing +X (heading = 0).
+    fish._x[0] = 0; fish._y[0] = 0; fish._z[0] = 0;
+    fish._angle[0] = 0;
+    fish._size[0] = 3;
+    fish._baseY[0] = 0;
+    fish._writeAllMatrices();
+    scene.add(fish.getObject());
+
+    // Camera setup based on URL view param.
+    const params = new URLSearchParams(location.search);
+    const view = params.get("view") || "iso";
+    const camera = new THREE.PerspectiveCamera(45, 1024/768, 0.1, 100);
+    const dist = 6;
+    switch (view) {
+      case "side":  camera.position.set(0, 0, dist);  break;     // looking from +Z (left side of fish)
+      case "back":  camera.position.set(-dist, 0, 0); break;     // looking from -X (behind fish)
+      case "front": camera.position.set(dist, 0, 0);  break;     // looking from +X (head-on)
+      case "top":   camera.position.set(0, dist, 0.001); break;  // looking down
+      case "under": camera.position.set(0, -dist, 0.001); break; // looking up
+      case "iso":
+      default:      camera.position.set(dist*0.7, dist*0.4, dist*0.7); break;
+    }
+    camera.lookAt(0, 0, 0);
+
+    // Animate so tail wiggle is visible.
+    let t0 = performance.now();
+    function loop() {
+      requestAnimationFrame(loop);
+      const t = (performance.now() - t0) / 1000;
+      fish._tNode.value = t;          // drive tail wiggle uniform directly
+      renderer.render(scene, camera);
+    }
+    loop();
+
+    // Tell test harness when first frame rendered.
+    setTimeout(() => { window._FISH_READY = true; }, 1500);
+  </script>
+</body>
+</html>
