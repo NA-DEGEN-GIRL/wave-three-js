@@ -1,5 +1,47 @@
 # wave-three-js
 
+## 🌐 Live Demo
+
+**[https://NA-DEGEN-GIRL.github.io/wave-three-js/](https://NA-DEGEN-GIRL.github.io/wave-three-js/)**
+
+Requires a WebGPU-capable browser (Chrome / Edge 113+ with hardware
+acceleration). The demo loads the full ocean, sky, boats, islands, fish
+school, and the GUI controls panel so you can tweak every uniform live.
+
+The demo deploys automatically from `main` via GitHub Actions; see
+`.github/workflows/deploy.yml`.
+
+## 📸 Screenshots
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/hero.png" alt="Hero shot (sunset preset)" width="100%"></td>
+    <td><img src="docs/screenshots/tropical.png" alt="Tropical preset" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><i>Sunset preset, boats + island in view</i></td>
+    <td align="center"><i>Tropical preset, see-through water</i></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/storm.png" alt="Storm preset" width="100%"></td>
+    <td><img src="docs/screenshots/wake.png" alt="Bow wake closeup" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><i>Storm preset, choppy waves + spray</i></td>
+    <td align="center"><i>Interactive bow wave + auto wake foam</i></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/screenshots/underwater.png" alt="Underwater view" width="100%"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><i>Camera below the surface -- looking up at the wave underside + fish school</i></td>
+  </tr>
+</table>
+
+> Screenshots are kept in `docs/screenshots/`. Drop new PNGs there
+> using the filenames in `docs/screenshots/README.md`.
+
+
 > WebGPU / TSL 기반 Three.js 바다 시뮬레이션 라이브러리 — 상용 `threejs-water-pro`의 API를 클론하여 직접 구현.
 > WebGPU / TSL ocean simulation library for Three.js — a clone of the commercial `threejs-water-pro` API, reimplemented from scratch.
 
