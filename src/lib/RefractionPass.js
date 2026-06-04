@@ -9,6 +9,45 @@
 
 import * as THREE from "three/webgpu";
 
+function sanitizeWebGpuRenderableGeometry(obj) {
+  const geometry = obj?.geometry;
+  if (!geometry || !geometry.isBufferGeometry) return 0;
+  let fixed = 0;
+  if (geometry.index === undefined) {
+    geometry.index = null;
+    fixed += 1;
+  }
+  if (geometry.indirect === undefined) {
+    geometry.indirect = null;
+    fixed += 1;
+  }
+  const attrs = geometry.attributes || {};
+  for (const key of Object.keys(attrs)) {
+    if (attrs[key] == null) {
+      delete attrs[key];
+      fixed += 1;
+    }
+  }
+  const morphAttrs = geometry.morphAttributes || {};
+  for (const key of Object.keys(morphAttrs)) {
+    if (!Array.isArray(morphAttrs[key])) continue;
+    const next = morphAttrs[key].filter(Boolean);
+    if (next.length !== morphAttrs[key].length) {
+      morphAttrs[key] = next;
+      fixed += 1;
+    }
+  }
+  return fixed;
+}
+
+function sanitizeWebGpuSceneGeometries(scene) {
+  let fixed = 0;
+  scene?.traverse?.((obj) => {
+    fixed += sanitizeWebGpuRenderableGeometry(obj);
+  });
+  return fixed;
+}
+
 export class RefractionPass {
   constructor({ resolution = 1024 } = {}) {
     this.resolution = resolution;
@@ -51,14 +90,28 @@ export class RefractionPass {
     });
 
     const prevTarget = renderer.getRenderTarget();
-    renderer.setRenderTarget(this.target);
-    renderer.clear();
-    renderer.render(scene, camera);
-    renderer.setRenderTarget(prevTarget);
-
-    scene.fog = prevFog;
-    for (const { m, side } of sideStates) m.side = side;
-    for (let i = 0; i < hideList.length; i++) hideList[i].visible = vis[i];
+    let renderError = null;
+    try {
+      renderer.setRenderTarget(this.target);
+      renderer.clear();
+      sanitizeWebGpuSceneGeometries(scene);
+      try {
+        renderer.render(scene, camera);
+      } catch (err) {
+        // Some WebGPU render-object caches are created while a procedural scene
+        // is changing; retry once after normalizing buffer geometry metadata.
+        sanitizeWebGpuSceneGeometries(scene);
+        renderer.render(scene, camera);
+      }
+    } catch (err) {
+      renderError = err;
+    } finally {
+      renderer.setRenderTarget(prevTarget);
+      scene.fog = prevFog;
+      for (const { m, side } of sideStates) m.side = side;
+      for (let i = 0; i < hideList.length; i++) hideList[i].visible = vis[i];
+    }
+    if (renderError) throw renderError;
   }
 
   dispose() {
