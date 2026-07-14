@@ -191,6 +191,10 @@ export class WaterSystem {
       clarity: 1.0,
     };
     this.fresnel = { normalStrength: 0.12, power: 5.0, fadePower: 1.0, fadeStart: 60 };
+    // Screen-space refraction is a compatibility path for meshes rendered by
+    // this Three scene. Keep the ocean default, but allow small/shallow scenes
+    // to opt into a subtler bend without rebuilding a separate water shader.
+    this.refractionStyle = { distortionStrength: 1.0 };
     this.sparkle = { enabled: true, intensity: 1.2, power: 512, minDistance: 10, fadeDistance: 500 };
     this.sss = { enabled: true, intensity: 0.6, power: 4.0 };
     this.ssr = { enabled: this.config.ssr, strength: 0.8 };
@@ -262,6 +266,7 @@ export class WaterSystem {
       reflectionFadeStart:  uniform(60),    // metres before distance fade kicks in
       reflectionFadeEnd:    uniform(450),
       reflectionDistortion: uniform(1.0),
+      refractionDistortion: uniform(1.0),
       uwFogColor:    uniform(new THREE.Color("#0a2830")),
       uwFogDensity:  uniform(0.002),
       uwDistortionInt:     uniform(0.02),
@@ -833,7 +838,9 @@ export class WaterSystem {
       // → small distortion (water is clear), grazing angle → no refraction (it would
       // expose seam artifacts at the horizon). The base distortion already gives the
       // surface a "rippled glass" look.
-      const refractDistort = vec2(n.x, n.z).mul(float(0.035).mul(smoothstep(float(0.0), float(0.4), cosVN)));
+      const refractDistort = vec2(n.x, n.z).mul(
+        float(0.035).mul(u.refractionDistortion).mul(smoothstep(float(0.0), float(0.4), cosVN)),
+      );
       const refractUV = screenUV.add(refractDistort);
       const refractedScene = texture(this.refraction.target.texture, refractUV).rgb;
 
@@ -1353,6 +1360,7 @@ export class WaterSystem {
     u.reflectionFadeStart.value  = this.reflection.fadeStart;
     u.reflectionFadeEnd.value    = this.reflection.fadeEnd;
     u.reflectionDistortion.value = this.reflection.distortionStrength;
+    u.refractionDistortion.value = this.refractionStyle.distortionStrength;
     u.fogEnabled.value     = this.fog.enabled ? 1 : 0;
     u.fogFadeStart.value   = this.fog.fadeStart;
     u.fogFadePower.value   = this.fog.fadePower;
@@ -1448,6 +1456,7 @@ function applyPreset(water, p) {
     else water.color[k] = v;
   }
   if (p.fresnel) Object.assign(water.fresnel, p.fresnel);
+  if (p.refractionStyle) Object.assign(water.refractionStyle, p.refractionStyle);
   if (p.sparkle) Object.assign(water.sparkle, p.sparkle);
   if (p.sun?.intensity != null) water.sun.intensity.value = p.sun.intensity;
   if (p.foam) {
