@@ -18,7 +18,7 @@ import {
   Fn, vec2, vec3, vec4, float, uniform, normalize, dot, cross, mix, clamp,
   pow, sin, cos, length, smoothstep, max, min, abs, fract, floor, exp,
   positionLocal, positionWorld, cameraPosition, uv, time, sub, add,
-  texture, screenUV, cameraViewMatrix, mat3, step,
+  texture, screenUV, cameraViewMatrix, mat3, step, sqrt,
 } from "three/tsl";
 
 import { getQualityConfig } from "./QualityLevels.js";
@@ -670,8 +670,8 @@ export class WaterSystem {
         // Smooth fade-in / fade-out instead of hard step(). 0.08 = inner edge.
         const fadeIn  = smoothstep(float(0.0), float(0.08), iUV.x)
                         .mul(smoothstep(float(0.0), float(0.08), iUV.y));
-        const fadeOut = smoothstep(float(1.0), float(0.92), iUV.x)
-                        .mul(smoothstep(float(1.0), float(0.92), iUV.y));
+        const fadeOut = float(1.0).sub(smoothstep(float(0.92), float(1.0), iUV.x))
+                        .mul(float(1.0).sub(smoothstep(float(0.92), float(1.0), iUV.y)));
         const iMask   = fadeIn.mul(fadeOut);
         interactiveDy = texture(this.interactive.currentTexture, iUV).r.mul(iMask);
       }
@@ -701,6 +701,33 @@ export class WaterSystem {
       const wEval_y = field[0].y;
       const wEval_z = field[0].z;
       const n = vec3(field[1].x, field[1].y, field[1].z).toVar();
+      // The fishing pond ports jeantimex/webgpu-water's packed heightfield
+      // normals. Blend that real interaction slope into the analytical pond
+      // baseline so a bobber drop bends Fresnel/reflection/refraction immediately
+      // instead of only moving coarse vertices. Other WaterSystem users keep the
+      // old graph because their InteractiveWater leaves this option disabled.
+      if (this.interactive?.surfaceNormalsEnabled) {
+        const iHalf = this.interactive.halfSizeUniform;
+        const iCtr = this.interactive.centerXZUniform;
+        const iUV = vec2(
+          sampleXZ.x.sub(iCtr.x).div(iHalf).mul(0.5).add(0.5),
+          sampleXZ.y.sub(iCtr.y).div(iHalf).mul(0.5).add(0.5),
+        );
+        const fadeIn = smoothstep(float(0.0), float(0.08), iUV.x)
+          .mul(smoothstep(float(0.0), float(0.08), iUV.y));
+        const fadeOut = float(1.0).sub(smoothstep(float(0.92), float(1.0), iUV.x))
+          .mul(float(1.0).sub(smoothstep(float(0.92), float(1.0), iUV.y)));
+        const iMask = fadeIn.mul(fadeOut);
+        const packed = texture(this.interactive.currentTexture, iUV);
+        const pondXZ = vec2(packed.b, packed.a).mul(iMask).toVar();
+        const pondY = sqrt(max(float(0.001), float(1.0).sub(dot(pondXZ, pondXZ))));
+        const pondNormal = normalize(vec3(pondXZ.x, pondY, pondXZ.y));
+        n.assign(normalize(vec3(
+          n.x.add(pondNormal.x.mul(1.2)),
+          n.y.mul(pondNormal.y),
+          n.z.add(pondNormal.z.mul(1.2)),
+        )));
+      }
       const foamSeedRaw = field[2].x;
       const jacobianDet = field[2].y;
       const whitecap = clamp(float(1.0).sub(jacobianDet).mul(2.5), 0.0, 1.0).toVar();

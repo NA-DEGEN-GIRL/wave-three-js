@@ -20,10 +20,29 @@
 import * as THREE from "three/webgpu";
 import {
   Fn, vec2, vec3, vec4, float, uniform, texture, uv,
-  dot, mix, clamp, max, min, exp, smoothstep, step, uniformArray,
+  mix, clamp, max, smoothstep, step, uniformArray, normalize,
+  cos, length, If,
 } from "three/tsl";
 
 const MAX_SPLATS = 24;
+
+function clampNumber(value, minValue, maxValue) {
+  const number = Number(value);
+  return Math.min(maxValue, Math.max(minValue, Number.isFinite(number) ? number : minValue));
+}
+
+function propagationCflSq({ worldSize, resolution, waveSpeed, damping, upstreamPropagation }) {
+  if (upstreamPropagation) {
+    // Equivalent to upstream's velocity update, but keep the 2-D leapfrog
+    // recurrence strictly inside its C² < 0.5-k/4 stability boundary.
+    const ratio = clampNumber(Number(waveSpeed) / 2.4, 0.1, 1);
+    const retainedVelocity = 1 - clampNumber(damping, 0, 0.2);
+    return Math.min(0.49, 0.5 * retainedVelocity * ratio);
+  }
+  const dx = worldSize / resolution;
+  const dt = 1 / 60;
+  return (waveSpeed * dt / dx) ** 2;
+}
 
 export class InteractiveWater {
   /**
@@ -32,20 +51,39 @@ export class InteractiveWater {
    * @param {number}  [opts.worldSize=200]   metres of world covered by the RT
    * @param {number}  [opts.waveSpeed=3.0]   ripple propagation speed m/s
    * @param {number}  [opts.damping=0.003]   per-step velocity damping (k)
+   * @param {number}  [opts.substeps=1]      simulation passes per update
+   * @param {boolean} [opts.zeroVelocityImpulses=false] add an impulse to both
+   *   height-history channels, matching jeantimex/webgpu-water's height-only drop
+   * @param {boolean} [opts.surfaceNormalsEnabled=false] pack heightfield X/Z
+   *   normals into B/A for a consuming surface shader
+   * @param {boolean} [opts.upstreamPropagation=false] use webgpu-water's
+   *   neighbour-average coefficient instead of the physical-CFL ocean mode
+   * @param {number}  [opts.maxSplats=24] fixed shader queue size (1..24)
    */
   constructor({
     resolution = 256,
     worldSize  = 200,
     waveSpeed  = 3.0,
     damping    = 0.003,
+    substeps   = 1,
+    zeroVelocityImpulses = false,
+    surfaceNormalsEnabled = false,
+    upstreamPropagation = false,
+    maxSplats = MAX_SPLATS,
   } = {}) {
     this.resolution = resolution;
     this.worldSize  = worldSize;
-    this.waveSpeed  = waveSpeed;
-    this.damping    = damping;
+    this.waveSpeed  = Math.max(0.01, Number(waveSpeed) || 0.01);
+    this.damping    = clampNumber(damping, 0, 0.2);
+    this.substeps   = Math.max(1, Math.min(4, Math.round(Number(substeps) || 1)));
+    this.zeroVelocityImpulses = !!zeroVelocityImpulses;
+    this.surfaceNormalsEnabled = !!surfaceNormalsEnabled;
+    this.upstreamPropagation = !!upstreamPropagation;
+    this.maxSplats = Math.max(1, Math.min(MAX_SPLATS, Math.round(Number(maxSplats) || MAX_SPLATS)));
     this.enabled    = true;
 
-    // RGBA16F: R=h_curr, G=h_old, B/A unused for now (could carry vx/vz later).
+    // RGBA16F: R=h_curr, G=h_old. Fishing optionally packs normal X/Z in B/A;
+    // legacy users retain B=0/A=1 and continue sampling only R/G.
     const opts = {
       type: THREE.HalfFloatType, format: THREE.RGBAFormat,
       generateMipmaps: false,
@@ -58,9 +96,13 @@ export class InteractiveWater {
     this._prevTextureNode   = texture(this.targetA.texture);
     this._outputTextureNode = texture(this.targetA.texture);
 
-    const dx  = worldSize / resolution;          // cell size (m)
-    const dt  = 1 / 60;                          // shader assumes ~60 Hz
-    const cflSq = (waveSpeed * dt / dx) ** 2;    // C² in the discretised eq
+    const cflSq = propagationCflSq({
+      worldSize,
+      resolution,
+      waveSpeed: this.waveSpeed,
+      damping: this.damping,
+      upstreamPropagation: this.upstreamPropagation,
+    });
 
     this._u = {
       centerXZ:      uniform(new THREE.Vector2(0, 0)),
@@ -69,10 +111,11 @@ export class InteractiveWater {
       recenterShift: uniform(new THREE.Vector2(0, 0)),
       worldHalfSize: uniform(worldSize * 0.5),
       cflSq:         uniform(cflSq),
-      damping:       uniform(damping),
+      damping:       uniform(this.damping),
+      dropOnly:      uniform(0),
 
       // Splat queue. Each vec4 = (worldX, worldZ, amplitude_m, sigma_m).
-      splats:        uniformArray(new Array(MAX_SPLATS).fill(0).map(() => new THREE.Vector4(0, 0, 0, 1))),
+      splats:        uniformArray(new Array(this.maxSplats).fill(0).map(() => new THREE.Vector4(0, 0, 0, 1))),
       splatCount:    uniform(0),
 
       // Master enable. Setting to 0 zeroes the output texture each frame
@@ -127,21 +170,27 @@ export class InteractiveWater {
 
       // Accumulate splats (additive into h_new only — never into h_old).
       const splatSum = float(0).toVar();
-      for (let i = 0; i < MAX_SPLATS; i++) {
-        const s = u.splats.element(i);
-        const dpos = vec2(s.x, s.y).sub(worldXZ);
-        const distSq = dot(dpos, dpos);
-        // Gaussian: amp · exp(-d² / (2σ²)). Add 1e-4 to σ² to dodge divide-by-zero.
-        const sig2 = s.w.mul(s.w).mul(2.0).add(0.0001);
-        const gauss = exp(distSq.div(sig2).negate());
-        splatSum.addAssign(s.z.mul(gauss));
-      }
-      h_new.addAssign(splatSum);
+      // The uniform branch is coherently skipped on the two ordinary update
+      // passes, avoiding 24 cosine evaluations per pixel when there is no drop.
+      If(u.splatCount.greaterThan(0), () => {
+        for (let i = 0; i < this.maxSplats; i++) {
+          const s = u.splats.element(i);
+          const dpos = vec2(s.x, s.y).sub(worldXZ);
+          // jeantimex/webgpu-water drop.frag.wgsl: compact cosine falloff inside
+          // the authored radius. `s.w` remains the public sigma/radius control.
+          const radial = max(float(0), float(1).sub(length(dpos).div(max(s.w, float(0.0001)))));
+          const cosineDrop = float(0.5).sub(cos(radial.mul(Math.PI)).mul(0.5));
+          const active = step(float(i + 1), u.splatCount);
+          splatSum.addAssign(s.z.mul(cosineDrop).mul(active));
+        }
+      });
+      if (!this.zeroVelocityImpulses) h_new.addAssign(splatSum);
 
       // Absorbing boundary — graduated fade in outer 4-cell ring (× ~0.94).
       const edge = uv().sub(0.5).abs();
       const edgeT = smoothstep(float(0.5).sub(float(texel * 4.0)), float(0.5), max(edge.x, edge.y));
-      h_new.assign(h_new.mul(mix(float(1.0), float(0.94), edgeT)));
+      const boundaryGain = mix(float(1.0), float(0.94), edgeT);
+      h_new.assign(h_new.mul(boundaryGain));
 
       // Gentle global decay — multiplies the whole field by ~0.999 per step
       // (~5 s half-life). Without this, asymmetric splats (hull dominates bow)
@@ -153,9 +202,31 @@ export class InteractiveWater {
       // Anti-runaway clamp.
       h_new.assign(clamp(h_new, float(-0.5), float(0.5)));
 
-      // Output: R = h_new (this frame's height), G = h_curr (becomes next frame's h_old).
+      // The fishing pond opts into the exact drop semantics used by
+      // jeantimex/webgpu-water (59d680ce): the event pass changes height while
+      // preserving velocity. In leapfrog storage, add the same compact drop to
+      // both height-history channels, then run the configured simulation steps.
+      const droppedHeight = clamp(h_curr.add(splatSum), float(-0.5), float(0.5));
+      const droppedHistory = clamp(h_old.add(splatSum), float(-0.5), float(0.5));
+      const outputHeight = mix(h_new, droppedHeight, u.dropOnly);
+      const outputHistory = mix(h_curr, droppedHistory, u.dropOnly);
+      const dxWorld = float(this.worldSize / this.resolution);
+      const normal = normalize(vec3(
+        hL.sub(hR).div(dxWorld.mul(2.0)),
+        1.0,
+        hD.sub(hU).div(dxWorld.mul(2.0)),
+      ));
+      // This reuses the propagation taps, so BA trails final R by one substep.
+      // The ~1/60 s approximation avoids upstream's additional full normal pass.
+
+      // Output: R = height, G = previous height, B/A = optional packed normal.
       const gain = u.gain;
-      return vec4(h_new.mul(gain), h_curr.mul(gain), 0.0, 1.0);
+      return vec4(
+        outputHeight.mul(gain),
+        outputHistory.mul(gain),
+        this.surfaceNormalsEnabled ? normal.x : float(0),
+        this.surfaceNormalsEnabled ? normal.z : float(1),
+      );
     })();
 
     this._simMat  = mat;
@@ -166,7 +237,7 @@ export class InteractiveWater {
   // ----- Public API -----
 
   /**
-   * Set the active per-frame splats (boats, static dimples). Up to MAX_SPLATS.
+   * Set the active per-frame splats (boats, static dimples). Up to maxSplats.
    * Each splat: { x, z, amp (m), sigma (m) }.
    *   amp < 0 → push water DOWN (hull, rock displacement)
    *   amp > 0 → push water UP   (bow wave lobe, splash impulse)
@@ -179,12 +250,12 @@ export class InteractiveWater {
     this._oneShots.length = 0;
 
     const arr = this._u.splats.array;
-    const n   = Math.min(combined.length, MAX_SPLATS);
+    const n   = Math.min(combined.length, this.maxSplats);
     for (let i = 0; i < n; i++) {
       const s = combined[i];
       arr[i].set(s.x ?? 0, s.z ?? 0, s.amp ?? 0, Math.max(0.1, s.sigma ?? 1));
     }
-    for (let i = n; i < MAX_SPLATS; i++) {
+    for (let i = n; i < this.maxSplats; i++) {
       arr[i].set(0, 0, 0, 1);
     }
     this._u.splatCount.value = n;
@@ -207,12 +278,14 @@ export class InteractiveWater {
     this.enabled = !!on;
     this._u.gain.value = on ? 1.0 : 0.0;
   }
-  setDamping(k)   { this.damping = k;   this._u.damping.value = k; }
+  setDamping(k) {
+    this.damping = clampNumber(k, 0, 0.2);
+    this._u.damping.value = this.damping;
+    this._u.cflSq.value = propagationCflSq(this);
+  }
   setWaveSpeed(c) {
-    this.waveSpeed = c;
-    const dx = this.worldSize / this.resolution;
-    const dt = 1 / 60;
-    this._u.cflSq.value = (c * dt / dx) ** 2;
+    this.waveSpeed = Math.max(0.01, Number(c) || 0.01);
+    this._u.cflSq.value = propagationCflSq(this);
   }
 
   /**
@@ -234,16 +307,31 @@ export class InteractiveWater {
     const half = this._u.worldHalfSize.value;
     this._u.recenterShift.value.set((newX - prev.x) / (2 * half), (newZ - prev.y) / (2 * half));
 
-    // Bind PREV target as input, render into the OTHER target, swap.
-    this._prevTextureNode.value = this.targetA.texture;
     const old = renderer.getRenderTarget();
-    renderer.setRenderTarget(this.targetB);
-    renderer.render(this._simScene, this._simCamera);
-    renderer.setRenderTarget(old);
+    const queuedSplatCount = Number(this._u.splatCount.value) || 0;
+    const separateDropPass = this.zeroVelocityImpulses && queuedSplatCount > 0;
+    const passCount = this.substeps + (separateDropPass ? 1 : 0);
+    for (let pass = 0; pass < passCount; pass += 1) {
+      // Bind PREV target as input, render into the OTHER target, swap.
+      this._prevTextureNode.value = this.targetA.texture;
+      const dropPass = separateDropPass && pass === 0;
+      this._u.dropOnly.value = dropPass ? 1 : 0;
+      this._u.splatCount.value = dropPass || (!separateDropPass && pass === 0)
+        ? queuedSplatCount
+        : 0;
+      if (pass > 0) {
+        this._u.recenterShift.value.set(0, 0);
+      }
+      renderer.setRenderTarget(this.targetB);
+      renderer.render(this._simScene, this._simCamera);
 
-    const swap = this.targetA;
-    this.targetA = this.targetB;
-    this.targetB = swap;
+      const swap = this.targetA;
+      this.targetA = this.targetB;
+      this.targetB = swap;
+    }
+    this._u.dropOnly.value = 0;
+    this._u.splatCount.value = 0;
+    renderer.setRenderTarget(old);
     this._outputTextureNode.value = this.targetA.texture;
   }
 
