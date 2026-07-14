@@ -133,11 +133,18 @@ export class InteractiveWater {
 
   _buildSimulationMaterial() {
     const geom = new THREE.PlaneGeometry(2, 2);
-    const mat  = new THREE.MeshBasicNodeMaterial({ depthTest: false, depthWrite: false });
+    const mat  = new THREE.MeshBasicNodeMaterial({
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.NoBlending,
+    });
     const u    = this._u;
     const texel = 1.0 / this.resolution;
 
-    mat.colorNode = Fn(() => {
+    // `colorNode` is intended for display colours and NodeMaterial forces its
+    // output alpha to 1 for opaque materials. This render target is simulation
+    // data: fishing stores normal Z in A, so use an exact fragment output.
+    mat.fragmentNode = Fn(() => {
       // World XZ at this fragment.
       const worldXZ = uv().mul(2.0).sub(1.0).mul(u.worldHalfSize).add(u.centerXZ);
 
