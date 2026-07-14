@@ -198,10 +198,13 @@ export class WaterSystem {
     this.sparkle = { enabled: true, intensity: 1.2, power: 512, minDistance: 10, fadeDistance: 500 };
     this.sss = { enabled: true, intensity: 0.6, power: 4.0 };
     this.ssr = { enabled: this.config.ssr, strength: 0.8 };
-    // Planar-reflection master strength. Lower values keep reflections subtle so
-    // scene props (rocks, palms) don't ghost-overlay the water surface.
+    // Reflection controls. `strength` selects how much of the captured planar/SSR
+    // scene replaces the analytical sky source. `fresnelStrength` is a separate,
+    // opt-in master gain on the final above-water reflection blend; its neutral
+    // default preserves the existing look for every map.
     this.reflection = {
-      strength: 0.55,         // [0..1] master multiplier on the reflection sample
+      strength: 0.55,         // [0..1] analytical-sky vs captured-scene source mix
+      fresnelStrength: 1.0,   // >= 0 final above-water reflection/Fresnel gain
       fadeStart: 60,          // metres before distance fade kicks in
       fadeEnd: 450,           // metres where reflection ~= 0
       distortionStrength: 1.0, // multiplier on normal-perturbation distortion
@@ -262,7 +265,8 @@ export class WaterSystem {
       splashIntensity:     uniform(1.0),
       splashEnabled:       uniform(1),
       // Reflection master controls (planar mirror).
-      reflectionStrength:   uniform(0.55),  // [0..1] global multiplier
+      reflectionStrength:   uniform(0.55),  // [0..1] captured-scene source mix
+      reflectionFresnelStrength: uniform(1.0),
       reflectionFadeStart:  uniform(60),    // metres before distance fade kicks in
       reflectionFadeEnd:    uniform(450),
       reflectionDistortion: uniform(1.0),
@@ -903,7 +907,8 @@ export class WaterSystem {
       bodyCol.addAssign(u.transmission.mul(sssAmount));
 
       // Combine: water * (1-F) + reflection * F + sun specular + sparkle.
-      const F = clamp(fresnel.add(float(0.08)), float(0.08), float(0.85)).toVar();
+      const baseFresnelBlend = clamp(fresnel.add(float(0.08)), float(0.08), float(0.85)).toVar();
+      const F = clamp(baseFresnelBlend.mul(u.reflectionFresnelStrength), float(0.0), float(1.0)).toVar();
       const reflectionTint = mix(vec3(1, 1, 1), bodyCol.mul(0.7).add(0.4), float(0.30));
       const aboveResult = mix(bodyCol, skyCol.mul(reflectionTint), F).toVar();
       aboveResult.addAssign(u.sunCol.mul(sunSpec));
@@ -1357,6 +1362,7 @@ export class WaterSystem {
     u.splashEnabled.value       = this.splash.enabled ? 1 : 0;
     u.splashIntensity.value     = this.splash.intensity;
     u.reflectionStrength.value   = this.reflection.strength;
+    u.reflectionFresnelStrength.value = Math.max(0, this.reflection.fresnelStrength ?? 1.0);
     u.reflectionFadeStart.value  = this.reflection.fadeStart;
     u.reflectionFadeEnd.value    = this.reflection.fadeEnd;
     u.reflectionDistortion.value = this.reflection.distortionStrength;

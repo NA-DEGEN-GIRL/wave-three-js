@@ -111,6 +111,13 @@ export class WaterSystem {
   sparkle: { enabled: boolean; intensity: number; power: number; minDistance: number; fadeDistance: number };
   sss: { enabled: boolean; intensity: number; power: number };
   ssr: { enabled: boolean; strength: number };
+  reflection: {
+    strength: number;
+    fresnelStrength: number;
+    fadeStart: number;
+    fadeEnd: number;
+    distortionStrength: number;
+  };
   sun: { direction: { value: THREE.Vector3 }; intensity: { value: number } };
   foam: { surface: FoamSurface; waves: FoamWaves; shoreline: FoamShoreline; contact: FoamContact };
   splash: { enabled: boolean; intensity: number };
