@@ -3,15 +3,16 @@ import * as THREE from "three/webgpu";
 import { Fn, vec3, vec4, float, uniform, mix, normalize, dot, positionWorld, cameraPosition, clamp, smoothstep, pow, max } from "three/tsl";
 
 export class GradientSky {
-  constructor({ topColor = "#1a4080", bottomColor = "#a4c1e0", sunDir = new THREE.Vector3(0.4, 0.6, 0.2).normalize(), sunColor = "#fff2e6", sunSize = 0.04 } = {}) {
+  constructor({ topColor = "#1a4080", bottomColor = "#a4c1e0", sunDir = new THREE.Vector3(0.4, 0.6, 0.2).normalize(), sunColor = "#fff2e6", sunSize = 0.04, showSunDisk = true } = {}) {
     this.sunUniforms = { direction: uniform(sunDir.clone().normalize()), intensity: uniform(1.0) };
     this._top = uniform(new THREE.Color(topColor));
     this._bot = uniform(new THREE.Color(bottomColor));
     this._sunCol = uniform(new THREE.Color(sunColor));
     this._sunSize = uniform(sunSize);
+    this._sunDiskVisibility = uniform(showSunDisk ? 1 : 0);
 
     this.atmosphereUniforms = { skyColor: this._top, skyBrightness: uniform(1.0), turbidity: uniform(2), rayleighCoefficient: uniform(1), mieCoefficient: uniform(0.003), mieDirectionalG: uniform(0.75) };
-    this.sunDiskUniforms = { color: this._sunCol, emissiveColor: uniform(new THREE.Color(sunColor)), emissiveIntensity: uniform(60), radius: this._sunSize };
+    this.sunDiskUniforms = { color: this._sunCol, emissiveColor: uniform(new THREE.Color(sunColor)), emissiveIntensity: uniform(60), radius: this._sunSize, visible: this._sunDiskVisibility };
     this.cloudUniforms = { enabled: uniform(0), coverage: uniform(0) };
 
     this._buildMesh();
@@ -22,6 +23,7 @@ export class GradientSky {
     const bot = this._bot;
     const sCol = this._sunCol;
     const sSize = this._sunSize;
+    const sunDiskVisibility = this._sunDiskVisibility;
     const sunDir = this.sunUniforms.direction;
     return Fn(([v]) => {
       const d = normalize(v);
@@ -29,7 +31,7 @@ export class GradientSky {
       let c = mix(bot, top, smoothstep(0.0, 0.5, t)).toVar();
       const cd = dot(d, sunDir);
       const disk = smoothstep(float(1.0).sub(sSize.mul(2.0)), float(1.0).sub(sSize), cd);
-      c.addAssign(sCol.mul(disk).mul(2.0));
+      c.addAssign(sCol.mul(disk).mul(sunDiskVisibility).mul(2.0));
       return c;
     });
   }
