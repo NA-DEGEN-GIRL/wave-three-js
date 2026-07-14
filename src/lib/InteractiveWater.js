@@ -145,11 +145,17 @@ export class InteractiveWater {
     // output alpha to 1 for opaque materials. This render target is simulation
     // data: fishing stores normal Z in A, so use an exact fragment output.
     mat.fragmentNode = Fn(() => {
+      // PlaneGeometry's UV origin is bottom-left, while a WebGPU render target
+      // is addressed from the top-left and TextureNode does not flip render-
+      // target samples. Keep simulation/world UVs in texture space so a world
+      // Z impulse is consumed at that same Z instead of being mirrored around
+      // centerXZ.y.
+      const simUV = vec2(uv().x, float(1).sub(uv().y));
       // World XZ at this fragment.
-      const worldXZ = uv().mul(2.0).sub(1.0).mul(u.worldHalfSize).add(u.centerXZ);
+      const worldXZ = simUV.mul(2.0).sub(1.0).mul(u.worldHalfSize).add(u.centerXZ);
 
       // Sample previous RT, compensating for camera recenter.
-      const prevUV = uv().add(u.recenterShift).toVar();
+      const prevUV = simUV.add(u.recenterShift).toVar();
 
       // Mask cells that were OUTSIDE the previous frame's domain (camera moved
       // and exposed new cells) — these should be zeroed, not edge-clamped, to
@@ -194,7 +200,7 @@ export class InteractiveWater {
       if (!this.zeroVelocityImpulses) h_new.addAssign(splatSum);
 
       // Absorbing boundary — graduated fade in outer 4-cell ring (× ~0.94).
-      const edge = uv().sub(0.5).abs();
+      const edge = simUV.sub(0.5).abs();
       const edgeT = smoothstep(float(0.5).sub(float(texel * 4.0)), float(0.5), max(edge.x, edge.y));
       const boundaryGain = mix(float(1.0), float(0.94), edgeT);
       h_new.assign(h_new.mul(boundaryGain));
