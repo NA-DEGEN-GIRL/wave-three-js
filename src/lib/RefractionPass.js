@@ -40,9 +40,14 @@ function sanitizeWebGpuRenderableGeometry(obj) {
   return fixed;
 }
 
-function sanitizeWebGpuSceneGeometries(scene) {
+function cameraCanRenderObject(camera, object) {
+  return !camera?.layers || !object?.layers || camera.layers.test(object.layers);
+}
+
+function sanitizeWebGpuSceneGeometries(scene, camera = null) {
   let fixed = 0;
-  scene?.traverse?.((obj) => {
+  scene?.traverseVisible?.((obj) => {
+    if (!cameraCanRenderObject(camera, obj)) return;
     fixed += sanitizeWebGpuRenderableGeometry(obj);
   });
   return fixed;
@@ -59,6 +64,13 @@ export class RefractionPass {
     // Linear depth via a DepthTexture attached to the same target.
     this.target.depthTexture = new THREE.DepthTexture(resolution, resolution);
     this.target.depthTexture.type = THREE.FloatType;
+    this.lastDiagnostics = Object.freeze({
+      candidateObjects: 0,
+      visibleDrawables: 0,
+      sideMutations: 0,
+      sanitizeFixes: 0,
+      retries: 0,
+    });
   }
 
   setSize(width, height) {
@@ -79,28 +91,49 @@ export class RefractionPass {
 
     // Flip culling so back faces aren't dropped from below-water angles.
     const sideStates = [];
-    scene.traverse((o) => {
-      if (o.material) {
+    const visitedMaterials = new Set();
+    let candidateObjects = 0;
+    let visibleDrawables = 0;
+    let sideMutations = 0;
+    scene.traverseVisible((o) => {
+      // A map may dedicate a camera layer to submerged objects. Respect the
+      // same layer mask here that renderer.render() will use, otherwise an
+      // underwater-only pass still walks and mutates every avatar, prop,
+      // weather particle and snow material in the full scene.
+      if (!cameraCanRenderObject(camera, o)) return;
+      candidateObjects += 1;
+      if (o.visible !== false && o.material) {
+        visibleDrawables += 1;
         const mats = Array.isArray(o.material) ? o.material : [o.material];
         for (const m of mats) {
+          // Shared materials can appear on many meshes. Saving them repeatedly
+          // after the first mutation would restore the later DoubleSide state
+          // instead of the original side and permanently corrupt culling.
+          if (!m || visitedMaterials.has(m)) continue;
+          visitedMaterials.add(m);
+          if (m.side === THREE.DoubleSide) continue;
           sideStates.push({ m, side: m.side });
           m.side = THREE.DoubleSide;
+          sideMutations += 1;
         }
       }
     });
 
     const prevTarget = renderer.getRenderTarget();
     let renderError = null;
+    let sanitizeFixes = 0;
+    let retries = 0;
     try {
       renderer.setRenderTarget(this.target);
       renderer.clear();
-      sanitizeWebGpuSceneGeometries(scene);
+      sanitizeFixes += sanitizeWebGpuSceneGeometries(scene, camera);
       try {
         renderer.render(scene, camera);
       } catch (err) {
         // Some WebGPU render-object caches are created while a procedural scene
         // is changing; retry once after normalizing buffer geometry metadata.
-        sanitizeWebGpuSceneGeometries(scene);
+        retries += 1;
+        sanitizeFixes += sanitizeWebGpuSceneGeometries(scene, camera);
         renderer.render(scene, camera);
       }
     } catch (err) {
@@ -111,6 +144,13 @@ export class RefractionPass {
       for (const { m, side } of sideStates) m.side = side;
       for (let i = 0; i < hideList.length; i++) hideList[i].visible = vis[i];
     }
+    this.lastDiagnostics = Object.freeze({
+      candidateObjects,
+      visibleDrawables,
+      sideMutations,
+      sanitizeFixes,
+      retries,
+    });
     if (renderError) throw renderError;
   }
 
